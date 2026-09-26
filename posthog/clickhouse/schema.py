@@ -387,6 +387,10 @@ from posthog.session_recordings.sql.session_replay_feature_sql import (
     WRITABLE_SESSION_REPLAY_FEATURES_TABLE_SQL,
 )
 
+from products.alerts.backend.models.platform_alert_events_sql import (
+    DISTRIBUTED_PLATFORM_ALERT_EVENTS_TABLE_SQL,
+    SHARDED_PLATFORM_ALERT_EVENTS_TABLE_SQL,
+)
 from products.cohorts.backend.models.sql import CREATE_COHORTPEOPLE_TABLE_SQL
 from products.error_tracking.backend.embedding import (
     DISTRIBUTED_DOCUMENT_EMBEDDINGS_TABLE_SQL,
@@ -418,6 +422,7 @@ from products.event_definitions.backend.models.property_definition import PROPER
 # objects are mocked and the ambr will go into infinite loop update.
 CREATE_MERGETREE_TABLE_QUERIES = (
     PERSON_PROPERTY_MUTATION_LOG_DATA_TABLE_SQL,
+    SHARDED_PLATFORM_ALERT_EVENTS_TABLE_SQL,
     LOG_ENTRIES_TABLE_SQL,
     LOG_ENTRIES_DATA_TABLE_SQL,
     CREATE_COHORTPEOPLE_TABLE_SQL,
@@ -517,6 +522,7 @@ CREATE_MERGETREE_TABLE_QUERIES = (
 )
 CREATE_DISTRIBUTED_TABLE_QUERIES = (
     PERSON_PROPERTY_MUTATION_LOG_TABLE_SQL,
+    DISTRIBUTED_PLATFORM_ALERT_EVENTS_TABLE_SQL,
     LOG_ENTRIES_AUX_DISTRIBUTED_TABLE_SQL,
     LOG_ENTRIES_AUX_WRITABLE_TABLE_SQL,
     WRITABLE_EVENTS_TABLE_SQL,
