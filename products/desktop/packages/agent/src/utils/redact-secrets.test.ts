@@ -135,6 +135,10 @@ describe("redactSecrets", () => {
       for (const text of [
         `x%3D${prefix}aaaa1111 end`,
         `x\\n${prefix}aaaa1111 end`,
+        `x\u001b[1;32m${prefix}aaaa1111 end`,
+        `x\\u001b[32m${prefix}aaaa1111 end`,
+        `x\\u00e9${prefix}aaaa1111 end`,
+        `x\\xe9${prefix}aaaa1111 end`,
       ]) {
         for (let cut = 1; cut < text.length; cut++) {
           const out = streamText([text.slice(0, cut), text.slice(cut)]);
@@ -143,6 +147,22 @@ describe("redactSecrets", () => {
       }
     },
   );
+
+  it("keeps the word check across a held prefix released with new text", () => {
+    expect(streamText(["x p", "ing alp", "ha_blend end"])).toBe(
+      "x ping alpha_blend end",
+    );
+  });
+
+  it("does not carry one chunk kind's text into the next kind's word check", () => {
+    const token = `pha_${"a".repeat(43)}`;
+    expect(
+      streamText([
+        { kind: "agent_message_chunk", text: "see al" },
+        { kind: "agent_thought_chunk", text: `${token} end` },
+      ]),
+    ).toBe("see al[REDACTED] end");
+  });
 
   it.each(TOKEN_RULES.map((rule) => rule.prefix))(
     "redacts %s after an escaped newline or a percent code",
@@ -199,7 +219,9 @@ describe("redactSecrets", () => {
   });
 });
 
-function streamText(parts: string[]): string {
+type StreamPart = string | { kind: string; text: string };
+
+function streamText(parts: StreamPart[]): string {
   const redactor = new SecretEventRedactor();
   const events = parts.flatMap((part) =>
     redactor.redact({
@@ -208,8 +230,12 @@ function streamText(parts: string[]): string {
         method: "session/update",
         params: {
           update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: part },
+            sessionUpdate:
+              typeof part === "string" ? "agent_message_chunk" : part.kind,
+            content: {
+              type: "text",
+              text: typeof part === "string" ? part : part.text,
+            },
           },
         },
       },
