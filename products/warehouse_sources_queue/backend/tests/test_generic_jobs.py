@@ -6,13 +6,15 @@ import pytest
 
 import psycopg
 
-from products.warehouse_sources_queue.backend.core.batch_consumer import BatchConsumerConfig
+from products.warehouse_sources_queue.backend.core.batch_consumer import BatchConsumerConfig, _group_by_key
 from products.warehouse_sources_queue.backend.core.generic_jobs import JOB_LEASE_TABLE, JOB_TABLE, Job, JobsTable
 from products.warehouse_sources_queue.backend.sdk.jobs import (
     Fail,
     FollowerSpec,
+    GenericJobAdapter,
     JobConsumer,
     JobContext,
+    JobRetryRequested,
     Outcome,
     Success,
 )
@@ -171,16 +173,34 @@ class TestClaim:
         assert await _claim(conn_b, OWNER_B) == []
 
     @pytest.mark.asyncio
-    async def test_run_gate_holds_followers_behind_executing_and_failed_steps(self, conn):
+    async def test_run_gate_holds_followers_behind_every_unsucceeded_step(self, conn):
         run_id = "run-1"
-        first = await _insert(conn, run_id=run_id, sequence=0, dedup_key="s0")
-        await _insert(conn, run_id=run_id, sequence=1, dedup_key="s1")
+        first = await _insert(conn, run_id=run_id, sequence=0, dedup_key="s0", priority=0)
+        second = await _insert(conn, run_id=run_id, sequence=1, dedup_key="s1", priority=10)
+
+        # A higher-priority later step must not be returned alongside its pending prerequisite.
+        assert [job.id for job in await _claim(conn)] == [first]
 
         await JobsTable.update_status(conn, job_id=first, job_state="executing")
         assert await _claim(conn) == []
 
+        await JobsTable.update_status(conn, job_id=first, job_state="waiting_retry", attempt=1)
+        async with conn.cursor() as cur:
+            await cur.execute(f"DELETE FROM {JOB_LEASE_TABLE}")
+        assert [job.id for job in await _claim(conn, retry_backoff_base_seconds=0)] == [first]
+
         await JobsTable.update_status(conn, job_id=first, job_state="failed", attempt=1)
         assert await _claim(conn) == []
+        assert await JobsTable.get_latest_state(conn, job_id=second) == "pending"
+
+    @pytest.mark.asyncio
+    async def test_engine_groups_jobs_by_the_lease_key_not_team(self, conn):
+        await _insert(conn, team_id=1, dedup_key="team-1")
+        await _insert(conn, team_id=2, dedup_key="team-2")
+
+        claimed = await _claim(conn)
+        assert {job.team_id for job in claimed} == {1, 2}
+        assert len(_group_by_key(claimed)) == 1
 
     @pytest.mark.asyncio
     async def test_waiting_retry_respects_backoff(self, conn):
@@ -197,14 +217,36 @@ class TestClaim:
 
 @pytest.mark.django_db(transaction=True)
 class TestStatusWrites:
+    @pytest.mark.parametrize("terminal_state", ["failed", "succeeded"])
     @pytest.mark.asyncio
-    async def test_failed_is_absorbing_for_guarded_writes(self, conn):
+    async def test_terminal_states_are_absorbing_for_guarded_writes(self, terminal_state, conn):
         job_id = await _insert(conn)
-        await JobsTable.update_status(conn, job_id=job_id, job_state="failed")
+        await JobsTable.update_status(conn, job_id=job_id, job_state=terminal_state)
 
-        wrote = await JobsTable.update_status_unless_failed(conn, job_id=job_id, job_state="succeeded")
+        wrote = await JobsTable.update_status_unless_failed(conn, job_id=job_id, job_state="executing")
         assert wrote is False
-        assert await JobsTable.get_latest_state(conn, job_id=job_id) == "failed"
+        assert await JobsTable.get_latest_state(conn, job_id=job_id) == terminal_state
+
+    @pytest.mark.asyncio
+    async def test_failure_transition_requires_the_current_executing_attempt(self, conn):
+        job_id = await _insert(conn)
+        [job] = await _claim(conn)
+        adapter = GenericJobAdapter(lane=LANE, kinds=[KIND])
+
+        await adapter.update_status(conn, batch_id=job_id, job_state="executing", attempt=1)
+        await adapter.fail_run(conn, batch=job, reason="failed")
+
+        async with conn.cursor() as cur:
+            await cur.execute(f"SELECT latest_state, latest_attempt FROM {JOB_TABLE} WHERE id = %s", (job_id,))
+            assert await cur.fetchone() == ("failed", 1)
+
+        # A stale attempt cannot overwrite a later owner's terminal result.
+        other_id = await _insert(conn, dedup_key="other", group_key="other")
+        [other] = await _claim(conn)
+        await adapter.update_status(conn, batch_id=other_id, job_state="executing", attempt=1)
+        await JobsTable.update_status(conn, job_id=other_id, job_state="succeeded", attempt=2)
+        await adapter.fail_run(conn, batch=other, reason="stale")
+        assert await JobsTable.get_latest_state(conn, job_id=other_id) == "succeeded"
 
     @pytest.mark.asyncio
     async def test_guarded_cas_refuses_stale_writer(self, conn):
@@ -235,6 +277,60 @@ class TestRecoverySweep:
             await cur.execute(f"UPDATE {JOB_LEASE_TABLE} SET expires_at = now() - interval '1 minute'")
         stale = await JobsTable.get_stale_executing(conn, lane=LANE, kinds=[KIND], grace_seconds=60)
         assert [j.id for j in stale] == [job_id]
+        await JobsTable.release_recovery_lock(conn, lane=LANE)
+
+    @pytest.mark.asyncio
+    async def test_recovery_is_bounded_and_single_flight(self, conn, conn_b):
+        for index in range(2):
+            job_id = await _insert(conn, group_key=f"group-{index}", dedup_key=f"job-{index}")
+            await JobsTable.update_status(conn, job_id=job_id, job_state="executing", attempt=1)
+        async with conn.cursor() as cur:
+            await cur.execute(f"UPDATE {JOB_TABLE} SET state_changed_at = now() - interval '1 hour'")
+
+        stale = await JobsTable.get_stale_executing(conn, lane=LANE, kinds=[KIND], limit=1)
+        assert len(stale) == 1
+        assert await JobsTable.get_stale_executing(conn_b, lane=LANE, kinds=[KIND], limit=1) == []
+
+        await JobsTable.release_recovery_lock(conn, lane=LANE)
+        assert len(await JobsTable.get_stale_executing(conn_b, lane=LANE, kinds=[KIND], limit=1)) == 1
+        await JobsTable.release_recovery_lock(conn_b, lane=LANE)
+
+
+@pytest.mark.django_db(transaction=True)
+class TestClaimableGauge:
+    @pytest.mark.asyncio
+    async def test_count_uses_run_backoff_and_lease_gates(self, conn):
+        run_id = "run-depth"
+        first = await _insert(conn, run_id=run_id, sequence=0, dedup_key="first")
+        await _insert(conn, run_id=run_id, sequence=1, dedup_key="second")
+        assert await JobsTable.get_claimable_count(conn, lane=LANE, kinds=[KIND]) == 1
+
+        await JobsTable.update_status(conn, job_id=first, job_state="waiting_retry", attempt=1)
+        assert await JobsTable.get_claimable_count(conn, lane=LANE, kinds=[KIND], retry_backoff_base_seconds=3600) == 0
+
+        await JobsTable.update_status(conn, job_id=first, job_state="pending", attempt=1)
+        await _claim(conn)
+        assert await JobsTable.get_claimable_count(conn, lane=LANE, kinds=[KIND]) == 0
+
+
+def test_explicit_retry_bypasses_custom_exception_classifier():
+    adapter = GenericJobAdapter(lane=LANE, kinds=[KIND], is_retryable=lambda _: False)
+    assert adapter.is_retryable_error(JobRetryRequested("again")) is True
+    assert adapter.is_retryable_error(Exception("no")) is False
+
+
+@pytest.mark.asyncio
+async def test_follower_state_is_replaced_and_scoped_to_one_group_task():
+    adapter = GenericJobAdapter(lane=LANE, kinds=[KIND])
+    follower = FollowerSpec(kind=KIND, lane=LANE, group_key="follower", team_id=1, payload={})
+
+    async def attempt() -> None:
+        adapter.stash_followers("job", (follower,))
+        adapter.stash_followers("job", ())
+        assert adapter._pending_followers.get() == ("job", ())
+
+    await asyncio.create_task(attempt())
+    assert adapter._pending_followers.get() is None
 
 
 class _RecordingHandler:

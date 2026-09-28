@@ -60,6 +60,7 @@ class Job:
     payload: dict[str, Any]
     priority: int
     dedup_key: str | None
+    latest_state: str
     latest_attempt: int
     state_changed_at: datetime | None
     created_at: datetime
@@ -68,6 +69,12 @@ class Job:
     @property
     def schema_id(self) -> str:
         return self.group_key
+
+    @property
+    def consumer_group_key(self) -> tuple[int, str]:
+        # One JobConsumer serves one lane, so group_key alone is the in-process
+        # identity matching the queue lease's (lane, group_key) serialization.
+        return (0, self.group_key)
 
     @property
     def run_uuid(self) -> str:
@@ -128,11 +135,14 @@ def _job_status_dual_write_sql(*, with_job_created_at: bool) -> str:
     """
 
 
-def _job_status_dual_write_unless_failed_sql(*, with_job_created_at: bool, with_expected_state_changed_at: bool) -> str:
-    """Guarded twin: writes nothing over a terminal 'failed', so a late success
-    cannot un-retire a job. Optionally arms a compare-and-swap on the caller's
-    observed ``state_changed_at`` (the recovery sweep's fence against a live
-    owner that finished between the stale scan and the re-queue)."""
+def _job_status_dual_write_guarded_sql(
+    *,
+    with_job_created_at: bool,
+    with_expected_state_changed_at: bool,
+    with_expected_state_and_attempt: bool,
+) -> str:
+    """Guarded twin that keeps terminal states absorbing and optionally applies
+    a compare-and-swap fence for a specific observed state transition."""
     created_at_predicate = (
         "j.created_at = %(job_created_at)s"
         if with_job_created_at
@@ -143,13 +153,18 @@ def _job_status_dual_write_unless_failed_sql(*, with_job_created_at: bool, with_
         if with_expected_state_changed_at
         else ""
     )
+    state_attempt_predicate = (
+        "\n              AND (j.latest_state, j.latest_attempt) = (%(expected_state)s, %(expected_attempt)s)"
+        if with_expected_state_and_attempt
+        else ""
+    )
     return f"""
         WITH target AS (
             SELECT j.id
             FROM {JOB_TABLE} j
             WHERE j.id = %(job_id)s
               AND {created_at_predicate}
-              AND j.latest_state IS DISTINCT FROM 'failed'{cas_predicate}
+              AND j.latest_state NOT IN ('succeeded', 'failed'){cas_predicate}{state_attempt_predicate}
             FOR UPDATE OF j
         ),
         ins AS (
@@ -175,7 +190,7 @@ def _job_status_dual_write_unless_failed_sql(*, with_job_created_at: bool, with_
 
 _JOB_COLUMNS = (
     "j.id, j.kind, j.lane, j.group_key, j.team_id, j.run_id, j.sequence, "
-    "j.payload, j.priority, j.dedup_key, j.latest_attempt, j.state_changed_at, j.created_at"
+    "j.payload, j.priority, j.dedup_key, j.latest_state, j.latest_attempt, j.state_changed_at, j.created_at"
 )
 
 # The insert's dedup guard. A partitioned table cannot enforce a unique index
@@ -203,6 +218,52 @@ _INSERT_SQL = f"""
     RETURNING id
 """
 
+_INSERT_MANY_SQL = f"""
+    WITH raw AS (
+        SELECT value, ordinality
+        FROM jsonb_array_elements(%(jobs)s::jsonb) WITH ORDINALITY
+    ),
+    input AS (
+        SELECT
+            value->>'kind' AS kind,
+            value->>'lane' AS lane,
+            value->>'group_key' AS group_key,
+            (value->>'team_id')::bigint AS team_id,
+            value->>'run_id' AS run_id,
+            COALESCE((value->>'sequence')::int, 0) AS sequence,
+            COALESCE(value->'payload', '{{}}'::jsonb) AS payload,
+            COALESCE((value->>'priority')::smallint, 0) AS priority,
+            value->>'dedup_key' AS dedup_key,
+            ordinality,
+            row_number() OVER (
+                PARTITION BY value->>'kind', value->>'dedup_key'
+                ORDER BY ordinality
+            ) AS dedup_rank
+        FROM raw
+    )
+    INSERT INTO {JOB_TABLE} (
+        id, kind, lane, group_key, team_id, run_id, sequence, payload,
+        priority, dedup_key, created_at
+    )
+    SELECT
+        gen_random_uuid(), i.kind, i.lane, i.group_key, i.team_id, i.run_id,
+        i.sequence, i.payload, i.priority, i.dedup_key, now()
+    FROM input i
+    WHERE i.dedup_key IS NULL OR (
+        i.dedup_rank = 1
+        AND NOT EXISTS (
+            SELECT 1 FROM {JOB_TABLE} d
+            WHERE d.kind = i.kind
+              AND d.dedup_key = i.dedup_key
+              AND d.created_at > now() - interval '{JOB_PARTITION_PRUNING_INTERVAL}'
+              AND d.latest_state != 'failed'
+              AND NOT d.superseded
+        )
+    )
+    ORDER BY i.ordinality
+    RETURNING id
+"""
+
 
 def _claim_candidates_sql() -> str:
     """Claimable-job candidates from the denormalized state columns.
@@ -212,9 +273,9 @@ def _claim_candidates_sql() -> str:
     touches wide rows, and the gates deliberately ignore the kind filter — a
     group must stay serialized within its lane whatever kinds its jobs carry.
 
-    Run gate: a job waits while an earlier ``sequence`` in the same ``run_id``
-    is executing, backing off, or failed (a failed step parks its followers
-    rather than letting them run out of order).
+    Run gate: a job waits until every earlier ``sequence`` in the same
+    ``run_id`` has succeeded. This includes pending and retryable predecessors;
+    a failed step continues to park its followers.
     """
     return f"""
         SELECT j.id, j.created_at
@@ -241,15 +302,7 @@ def _claim_candidates_sql() -> str:
                     WHERE j_prev.run_id = j.run_id
                         AND j_prev.sequence < j.sequence
                         AND j_prev.created_at > now() - interval '{JOB_PARTITION_PRUNING_INTERVAL}'
-                        AND (
-                            j_prev.latest_state IN ('executing', 'failed')
-                            OR (
-                                j_prev.latest_state = 'waiting_retry'
-                                AND j_prev.state_changed_at > now() - make_interval(
-                                    secs => %(backoff)s * GREATEST(j_prev.latest_attempt, 1)
-                                )
-                            )
-                        )
+                        AND j_prev.latest_state != 'succeeded'
                 )
             )
             AND NOT EXISTS (
@@ -311,23 +364,23 @@ class JobsTable:
         transaction even on an autocommit connection, so a crash mid-way
         enqueues nothing (the caller's dedup keys make the retry idempotent).
         """
-        ids: list[str] = []
+        if not jobs:
+            return []
+        normalized = [
+            {
+                "run_id": None,
+                "sequence": 0,
+                "priority": 0,
+                "dedup_key": None,
+                **job,
+                "payload": job.get("payload", {}),
+            }
+            for job in jobs
+        ]
         async with conn.transaction():
-            for job in jobs:
-                cursor = await conn.execute(
-                    _INSERT_SQL,
-                    {
-                        "run_id": None,
-                        "sequence": 0,
-                        "priority": 0,
-                        "dedup_key": None,
-                        **{**job, "payload": json.dumps(job.get("payload", {}))},
-                    },
-                )
-                row = await cursor.fetchone()
-                if row:
-                    ids.append(str(row[0]))
-        return ids
+            cursor = await conn.execute(_INSERT_MANY_SQL, {"jobs": json.dumps(normalized)})
+            rows = await cursor.fetchall()
+        return [str(row[0]) for row in rows]
 
     # -- reads (consumer side) -----------------------------------------------
 
@@ -452,10 +505,14 @@ class JobsTable:
         job_created_at: datetime | None = None,
         expected_state_changed_at: datetime | None = None,
         arm_cas: bool = False,
+        expected_state: str | None = None,
+        expected_attempt: int | None = None,
     ) -> bool:
-        """Guarded status write: returns False (writing nothing) over a terminal
-        'failed'. Pass ``arm_cas=True`` to also require ``state_changed_at`` to
-        equal ``expected_state_changed_at`` (including a genuine None)."""
+        """Guarded status write that never overwrites a terminal state.
+
+        A caller may compare-and-swap either the observed timestamp (recovery)
+        or the expected state and attempt (normal executing transitions).
+        """
         params: dict[str, Any] = {
             "job_id": job_id,
             "job_state": job_state,
@@ -466,10 +523,15 @@ class JobsTable:
             params["job_created_at"] = job_created_at
         if arm_cas:
             params["expected_state_changed_at"] = expected_state_changed_at
+        with_expected_state_and_attempt = expected_state is not None and expected_attempt is not None
+        if with_expected_state_and_attempt:
+            params["expected_state"] = expected_state
+            params["expected_attempt"] = expected_attempt
         cursor = await conn.execute(
-            _job_status_dual_write_unless_failed_sql(
+            _job_status_dual_write_guarded_sql(
                 with_job_created_at=job_created_at is not None,
                 with_expected_state_changed_at=arm_cas,
+                with_expected_state_and_attempt=with_expected_state_and_attempt,
             ),
             params,
         )
@@ -597,9 +659,19 @@ class JobsTable:
         lane: str,
         kinds: list[str],
         grace_seconds: int = 0,
+        limit: int = 100,
     ) -> list[Job]:
-        """Jobs stuck in 'executing' whose group lease is absent or expired (owner gone)."""
+        """Claim one bounded stale-job recovery page for this lane.
+
+        A session advisory lock single-flights the sweep across the fleet. The
+        caller releases it via ``release_recovery_lock`` after processing.
+        """
+        lock_name = f"generic_jobs_recovery:{lane}"
         async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (lock_name,))
+            lock_row = await cur.fetchone()
+            if not lock_row or not lock_row["pg_try_advisory_lock"]:
+                return []
             await cur.execute(
                 f"""
                 SELECT {_JOB_COLUMNS}
@@ -614,11 +686,22 @@ class JobsTable:
                       WHERE l.lane = j.lane AND l.group_key = j.group_key
                         AND l.expires_at > now()
                   )
+                ORDER BY j.state_changed_at ASC, j.created_at ASC, j.id ASC
+                LIMIT %(limit)s
                 """,
-                {"lane": lane, "kinds": kinds, "grace": grace_seconds},
+                {"lane": lane, "kinds": kinds, "grace": grace_seconds, "limit": limit},
             )
             rows = await cur.fetchall()
+            if not rows:
+                await cur.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock_name,))
         return [Job(**{**row, "id": str(row["id"])}) for row in rows]
+
+    @staticmethod
+    async def release_recovery_lock(conn: psycopg.AsyncConnection[Any], *, lane: str) -> None:
+        await conn.execute(
+            "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+            (f"generic_jobs_recovery:{lane}",),
+        )
 
     @staticmethod
     async def get_claimable_count(
@@ -626,19 +709,24 @@ class JobsTable:
         *,
         lane: str,
         kinds: list[str],
+        retry_backoff_base_seconds: int = 0,
     ) -> int:
-        """Depth gauge: jobs state-eligible for claiming right now (KEDA input)."""
+        """Depth gauge using the claim path's eligibility and gating predicates."""
+        candidates_sql = _claim_candidates_sql()
         async with conn.cursor() as cur:
             await cur.execute(
                 f"""
-                SELECT count(*) FROM {JOB_TABLE} j
-                WHERE j.created_at > now() - interval '{JOB_PARTITION_PRUNING_INTERVAL}'
-                  AND j.lane = %(lane)s
-                  AND j.kind = ANY(%(kinds)s)
-                  AND NOT j.superseded
-                  AND j.latest_state IN ('pending', 'waiting_retry')
+                SELECT count(*) FROM (
+                    {candidates_sql}
+                    AND NOT EXISTS (
+                        SELECT 1 FROM {JOB_LEASE_TABLE} l_live
+                        WHERE l_live.lane = j.lane
+                          AND l_live.group_key = j.group_key
+                          AND l_live.expires_at > now()
+                    )
+                ) claimable
                 """,
-                {"lane": lane, "kinds": kinds},
+                {"lane": lane, "kinds": kinds, "backoff": retry_backoff_base_seconds},
             )
             row = await cur.fetchone()
             return int(row[0]) if row else 0

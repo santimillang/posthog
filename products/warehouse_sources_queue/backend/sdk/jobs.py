@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -101,9 +102,9 @@ class GenericJobAdapter:
     waiting_retry_state = "waiting_retry"
     # Lease ownership is token-based, so any connection works.
     per_group_connections = True
-    # A skip means "already terminal"; the succeeded re-write is absorbed by the
-    # unless-failed guard, so recording it is safe.
-    record_skip_as_success = True
+    # A skip means the row is already terminal. Do not regress it through an
+    # executing write merely to record another success.
+    record_skip_as_success = False
 
     def __init__(
         self,
@@ -111,19 +112,26 @@ class GenericJobAdapter:
         lane: str,
         kinds: list[str],
         is_retryable: Callable[[Exception], bool] | None = None,
+        recovery_sweep_limit: int = 100,
     ) -> None:
         self._lane = lane
         self._kinds = kinds
         self._is_retryable = is_retryable
-        # Followers a handler returned, keyed by job id, consumed by the
-        # succeeded status write so both land in one transaction. The engine
-        # runs process and the status write on the same group task, so there is
-        # no concurrent access per key.
-        self._pending_followers: dict[str, tuple[FollowerSpec, ...]] = {}
+        self._recovery_sweep_limit = recovery_sweep_limit
+        # Attempt-local state follows the engine's group task. It cannot leak
+        # into a later attempt when ownership is lost and the task is abandoned.
+        self._pending_followers: ContextVar[tuple[str, tuple[FollowerSpec, ...]] | None] = ContextVar(
+            "generic_job_pending_followers", default=None
+        )
+        self._executing_attempt: ContextVar[tuple[str, int] | None] = ContextVar(
+            "generic_job_executing_attempt", default=None
+        )
+        self._recovery_lock_held: ContextVar[bool] = ContextVar("generic_job_recovery_lock_held", default=False)
 
     def stash_followers(self, job_id: str, followers: tuple[FollowerSpec, ...]) -> None:
-        if followers:
-            self._pending_followers[job_id] = followers
+        # An empty success deliberately replaces followers from any earlier
+        # invocation in this task.
+        self._pending_followers.set((job_id, followers))
 
     async def fetch_and_lock(
         self,
@@ -151,12 +159,19 @@ class GenericJobAdapter:
         batches: list[Job],
         owner_token: str,
     ) -> None:
-        await JobsTable.unlock_groups(
-            conn,
-            lane=self._lane,
-            group_keys=sorted({job.group_key for job in batches}),
-            owner_token=owner_token,
-        )
+        try:
+            await JobsTable.unlock_groups(
+                conn,
+                lane=self._lane,
+                group_keys=sorted({job.group_key for job in batches}),
+                owner_token=owner_token,
+            )
+        finally:
+            if self._recovery_lock_held.get():
+                try:
+                    await JobsTable.release_recovery_lock(conn, lane=self._lane)
+                finally:
+                    self._recovery_lock_held.set(False)
 
     async def release_all_owned(
         self,
@@ -177,11 +192,13 @@ class GenericJobAdapter:
         batch_created_at: datetime | None = None,
         expected_state_changed_at: datetime | None = None,
     ) -> None:
+        current = self._executing_attempt.get()
+        expected_attempt = current[1] if current is not None and current[0] == batch_id else None
+        expected_state = self.executing_state if expected_attempt is not None else None
+
         if job_state == self.succeeded_state:
-            # Peek rather than pop: if the transaction below raises, the
-            # entry must still be there for a subsequent retry to pick up,
-            # otherwise a crash mid-commit would silently drop the followers.
-            followers = self._pending_followers.get(batch_id, ())
+            pending = self._pending_followers.get()
+            followers = pending[1] if pending is not None and pending[0] == batch_id else ()
             # Terminal write and follower enqueue commit together: a crash
             # between them cannot complete a job without its followers.
             async with conn.transaction():
@@ -192,8 +209,12 @@ class GenericJobAdapter:
                     attempt=attempt,
                     error_response=error_response,
                     job_created_at=batch_created_at,
+                    expected_state=expected_state,
+                    expected_attempt=expected_attempt,
                 )
-                if wrote and followers:
+                if not wrote:
+                    raise OwnershipLostError(f"job {batch_id} moved before its success transition")
+                if followers:
                     await JobsTable.insert_many(
                         conn,
                         [
@@ -211,14 +232,12 @@ class GenericJobAdapter:
                             for f in followers
                         ],
                     )
-            # Only drop the stash once the transaction has actually committed
-            # (i.e. the block above returned without raising).
-            self._pending_followers.pop(batch_id, None)
+            self._pending_followers.set(None)
+            self._executing_attempt.set(None)
             return
-        # expected_state_changed_at arms a compare-and-swap: the recovery sweep passes
-        # the state it observed so a stale re-queue can't clobber a newer terminal write
-        # (e.g. a late success) with 'waiting_retry'. update_status_unless_failed also
-        # keeps 'failed' absorbing for every write here, not just the succeeded one.
+
+        # Recovery fences on its observed timestamp; transitions made by the
+        # active handler fence on the executing state and current attempt.
         arm_cas = expected_state_changed_at is not None
         wrote = await JobsTable.update_status_unless_failed(
             conn,
@@ -229,12 +248,13 @@ class GenericJobAdapter:
             job_created_at=batch_created_at,
             expected_state_changed_at=expected_state_changed_at,
             arm_cas=arm_cas,
+            expected_state=expected_state,
+            expected_attempt=expected_attempt,
         )
-        if arm_cas and not wrote:
-            raise OwnershipLostError(
-                f"job {batch_id} moved under this writer (already failed or state advanced); "
-                f"refusing to write '{job_state}' over it"
-            )
+        if not wrote:
+            raise OwnershipLostError(f"job {batch_id} moved under this writer; refusing to write '{job_state}' over it")
+        if job_state == self.executing_state:
+            self._executing_attempt.set((batch_id, attempt))
 
     async def fail_run(
         self,
@@ -247,15 +267,23 @@ class GenericJobAdapter:
         # fan-out in phase 1: failing the one job is the whole action, and the
         # run gate parks any followers behind the failed sequence.
         try:
-            self._pending_followers.pop(batch.id, None)
-            await JobsTable.update_status(
+            self._pending_followers.set(None)
+            current = self._executing_attempt.get()
+            if current is not None and current[0] == batch.id:
+                expected_state, expected_attempt = self.executing_state, current[1]
+            else:
+                expected_state, expected_attempt = batch.latest_state, batch.latest_attempt
+            await JobsTable.update_status_unless_failed(
                 conn,
                 job_id=batch.id,
                 job_state="failed",
-                attempt=batch.latest_attempt,
+                attempt=expected_attempt,
                 error_response={"error": reason},
                 job_created_at=batch.created_at,
+                expected_state=expected_state,
+                expected_attempt=expected_attempt,
             )
+            self._executing_attempt.set(None)
         except Exception:
             logger.exception("generic_jobs_fail_run_write_failed", extra={"job_id": batch.id})
 
@@ -302,9 +330,15 @@ class GenericJobAdapter:
         grace_seconds: int,
         keep_locks: bool = False,
     ) -> list[Job]:
-        return await JobsTable.get_stale_executing(
-            conn, lane=self._lane, kinds=self._kinds, grace_seconds=grace_seconds
+        stale = await JobsTable.get_stale_executing(
+            conn,
+            lane=self._lane,
+            kinds=self._kinds,
+            grace_seconds=grace_seconds,
+            limit=self._recovery_sweep_limit,
         )
+        self._recovery_lock_held.set(bool(stale))
+        return stale
 
     async def reconcile_failed_runs(
         self,
@@ -328,6 +362,8 @@ class GenericJobAdapter:
         return state not in TERMINAL_JOB_STATES
 
     def is_retryable_error(self, err: Exception) -> bool:
+        if isinstance(err, JobRetryRequested):
+            return True
         if isinstance(err, PermanentBatchApplyError):
             return False
         if self._is_retryable is not None:
@@ -377,9 +413,15 @@ class JobConsumer:
         health_reporter: Callable[[], None] | None = None,
         metrics: ConsumerMetrics | None = None,
         is_retryable: Callable[[Exception], bool] | None = None,
+        recovery_sweep_limit: int = 100,
     ) -> None:
         self._handlers = handlers
-        self._adapter = GenericJobAdapter(lane=lane, kinds=sorted(handlers), is_retryable=is_retryable)
+        self._adapter = GenericJobAdapter(
+            lane=lane,
+            kinds=sorted(handlers),
+            is_retryable=is_retryable,
+            recovery_sweep_limit=recovery_sweep_limit,
+        )
         self._ctx = JobContext(logger=logger)
         # The engine is typed against the batch item; Job satisfies its runtime
         # attribute contract through the documented aliases, so the casts bridge
