@@ -13,6 +13,7 @@ products/demo/backend/logic/products/hedgebox/matrix.py::HedgeboxMatrix.set_proj
 products/demo/backend/logic/products/hedgebox/matrix.py::HedgeboxMatrix.set_project_up::FeatureFlag.objects.create()
 products/early_access_features/backend/api.py::clear_feature_enrollment::feature_flag.filters =
 products/feature_flags/evals/seeders.py::_create_flag::FeatureFlag.objects.create()
+products/feature_flags/evals/seeders.py::seed_recently_updated_flag::FeatureFlag.objects.create()
 products/feature_flags/evals/seeders.py::seed_stale_full_rollout_flag::FeatureFlag.objects.create()
 products/feature_flags/evals/seeders.py::seed_stale_partial_rollout_flag::FeatureFlag.objects.create()
 products/marketing_analytics/backend/demo/config.py::enable_feature_flags::FeatureFlag.objects.update_or_create()
