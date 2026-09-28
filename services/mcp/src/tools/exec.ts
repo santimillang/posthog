@@ -1,4 +1,4 @@
-import { getToolInputProperties, type ShouldRecordInputKeyFn } from '@posthog/mcp-analytics'
+import { getToolInputProperties } from '@posthog/mcp-analytics'
 import { stringify as stringifyYaml } from 'yaml'
 import { z } from 'zod'
 
@@ -1488,17 +1488,6 @@ export function describeValidationError(
     return { fields, inputKeys: describeInputKeys(input, schema) }
 }
 
-const RECORDABLE_KEY_PATTERN = /^[A-Za-z0-9_.-]+$/
-
-/**
- * Widens the SDK's default, which records only declared names: an undeclared name is
- * recorded too when it is identifier-shaped, because measuring which wrong spellings
- * agents send is the point of `$mcp_input_keys` here. A name that is not
- * identifier-shaped can carry arbitrary caller text, so it stays `[redacted]`.
- */
-export const shouldRecordInputKey: ShouldRecordInputKeyFn = (key, { declared }) =>
-    declared || RECORDABLE_KEY_PATTERN.test(key)
-
 /**
  * `$mcp_input_keys` and `$mcp_input_aliases_used` for one call, from the SDK helper, with no
  * values. The alias map comes from the schema's own `normalizeParamAliases` layers, so
@@ -1509,7 +1498,6 @@ export const shouldRecordInputKey: ShouldRecordInputKeyFn = (key, { declared }) 
  */
 export function describeInputShape(input: unknown, schema?: z.ZodType): Record<string, unknown> {
     return getToolInputProperties(input, schema, {
-        shouldRecordInputKey,
         inputAliases: schema ? readParamAliases(schema) : undefined,
     })
 }
