@@ -69,15 +69,38 @@ _UPSERT_STATE_SQL = f"""
         updated_at = now()
 """
 
-_INSERT_DECISION_SQL = f"""
-    INSERT INTO {SCHEDULER_DECISION_TABLE} (
-        team_id, schema_id, window_boundary, due_at, decision, interval_seconds, late_seconds
+_INSERT_DECISIONS_SQL = f"""
+    WITH input AS (
+        SELECT *
+        FROM unnest(
+            %(team_ids)s::bigint[],
+            %(schema_ids)s::text[],
+            %(window_boundaries)s::timestamptz[],
+            %(due_times)s::timestamptz[],
+            %(decisions)s::text[],
+            %(intervals)s::bigint[],
+            %(lateness)s::double precision[]
+        ) WITH ORDINALITY AS rows(
+            team_id, schema_id, window_boundary, due_at, decision,
+            interval_seconds, late_seconds, record_index
+        )
+    ), deduplicated AS (
+        SELECT DISTINCT ON (schema_id, due_at) *
+        FROM input
+        ORDER BY schema_id, due_at, record_index
+    ), inserted AS (
+        INSERT INTO {SCHEDULER_DECISION_TABLE} (
+            team_id, schema_id, window_boundary, due_at, decision, interval_seconds, late_seconds
+        )
+        SELECT team_id, schema_id, window_boundary, due_at, decision, interval_seconds, late_seconds
+        FROM deduplicated
+        ON CONFLICT (schema_id, due_at) DO NOTHING
+        RETURNING schema_id, due_at
     )
-    VALUES (
-        %(team_id)s, %(schema_id)s, %(window_boundary)s, %(due_at)s, %(decision)s,
-        %(interval_seconds)s, %(late_seconds)s
-    )
-    ON CONFLICT (schema_id, window_boundary) DO NOTHING
+    SELECT deduplicated.record_index
+    FROM deduplicated
+    INNER JOIN inserted USING (schema_id, due_at)
+    ORDER BY deduplicated.record_index
 """
 
 
@@ -182,30 +205,31 @@ class SchedulerStateTable:
     async def insert_decisions(
         conn: psycopg.AsyncConnection[Any],
         records: list[DecisionRecord],
-    ) -> tuple[int, int]:
-        """Record decisions; returns (inserted, refused). A refusal means the
-        (schema_id, window_boundary) pair was already recorded, which in a
-        single-flighted fleet indicates a duplicate-window bug worth a metric."""
+    ) -> tuple[list[DecisionRecord], int]:
+        """Record decisions and return (inserted records, refused count).
+
+        A refusal means the (schema_id, due_at) pair was already recorded,
+        which in a single-flighted fleet indicates a duplicate-window bug
+        worth a metric.
+        """
         if not records:
-            return (0, 0)
+            return ([], 0)
         async with conn.cursor() as cur:
-            await cur.executemany(
-                _INSERT_DECISION_SQL,
-                [
-                    {
-                        "team_id": record.team_id,
-                        "schema_id": record.schema_id,
-                        "window_boundary": record.window_boundary,
-                        "due_at": record.due_at,
-                        "decision": record.decision,
-                        "interval_seconds": record.interval_seconds,
-                        "late_seconds": record.late_seconds,
-                    }
-                    for record in records
-                ],
+            await cur.execute(
+                _INSERT_DECISIONS_SQL,
+                {
+                    "team_ids": [record.team_id for record in records],
+                    "schema_ids": [record.schema_id for record in records],
+                    "window_boundaries": [record.window_boundary for record in records],
+                    "due_times": [record.due_at for record in records],
+                    "decisions": [record.decision for record in records],
+                    "intervals": [record.interval_seconds for record in records],
+                    "lateness": [record.late_seconds for record in records],
+                },
             )
-            inserted = max(cur.rowcount, 0)
-        return (inserted, len(records) - inserted)
+            inserted_indexes = [row[0] - 1 for row in await cur.fetchall()]
+        inserted = [records[index] for index in inserted_indexes]
+        return (inserted, len(records) - len(inserted))
 
     @staticmethod
     async def prune_decisions(

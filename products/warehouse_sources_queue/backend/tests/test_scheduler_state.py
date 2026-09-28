@@ -38,12 +38,18 @@ def _state(schema_id: str, *, due_in_seconds: float, interval: int = INTERVAL, o
     )
 
 
-def _decision(schema_id: str, window_boundary: datetime, decision: str = "would_fire") -> DecisionRecord:
+def _decision(
+    schema_id: str,
+    window_boundary: datetime,
+    decision: str = "would_fire",
+    *,
+    due_at: datetime | None = None,
+) -> DecisionRecord:
     return DecisionRecord(
         team_id=1,
         schema_id=schema_id,
         window_boundary=window_boundary,
-        due_at=window_boundary,
+        due_at=due_at or window_boundary,
         decision=decision,
         interval_seconds=INTERVAL,
         late_seconds=1.0,
@@ -101,18 +107,23 @@ class TestSchedulerState:
             assert await SchedulerStateTable.claim_due(conn, limit=10) == []
 
     @pytest.mark.asyncio
-    async def test_decision_insert_dedups_on_schema_and_window(self, conn):
+    async def test_decision_insert_dedups_on_schema_and_due_time(self, conn):
         boundary = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
+        first = _decision("s1", boundary)
 
-        assert await SchedulerStateTable.insert_decisions(conn, [_decision("s1", boundary)]) == (1, 0)
-        # Same window again (a duplicate tick) is refused; a skip decision for
-        # the same window must not overwrite the recorded one either.
+        assert await SchedulerStateTable.insert_decisions(conn, [first]) == ([first], 0)
+        # The same due time again (a duplicate tick) is refused; a skip decision
+        # must not overwrite the recorded one either.
         assert await SchedulerStateTable.insert_decisions(
             conn, [_decision("s1", boundary, decision="skip_overlap")]
-        ) == (0, 1)
-        assert await SchedulerStateTable.insert_decisions(
-            conn, [_decision("s1", boundary + timedelta(seconds=INTERVAL)), _decision("s2", boundary)]
-        ) == (2, 0)
+        ) == ([], 1)
+
+        recadenced = _decision("s1", boundary, due_at=boundary + timedelta(minutes=30))
+        other_schema = _decision("s2", boundary)
+        assert await SchedulerStateTable.insert_decisions(conn, [recadenced, other_schema]) == (
+            [recadenced, other_schema],
+            0,
+        )
 
     @pytest.mark.asyncio
     async def test_upsert_preserves_next_due_at_unless_cadence_changed(self, conn):

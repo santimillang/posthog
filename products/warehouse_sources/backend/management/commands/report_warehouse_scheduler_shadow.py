@@ -75,7 +75,7 @@ class Command(BaseCommand):
         jobs_qs = ExternalDataJob.objects.filter(created_at__gte=since - tolerance, schema_id__isnull=False)
         if options["team_id"] is not None:
             jobs_qs = jobs_qs.filter(team_id=options["team_id"])
-        jobs = list(jobs_qs.values_list("schema_id", "workflow_id", "created_at"))
+        jobs = list(jobs_qs.values_list("schema_id", "workflow_id"))
 
         # One-to-one greedy matching per schema, nearest job time to due time first.
         unmatched: dict[str, list[datetime]] = {}
@@ -85,22 +85,22 @@ class Command(BaseCommand):
         matched = 0
         temporal_only: list[str] = []
         adhoc = 0
-        for schema_uuid, workflow_id, created_at in jobs:
+        for schema_uuid, workflow_id in jobs:
             schema_id = str(schema_uuid)
             fired_at = parse_schedule_fired_at(schema_id, workflow_id)
-            schedule_fired = fired_at is not None
-            job_time = fired_at if fired_at is not None else created_at
+            if fired_at is None:
+                # Runs with no parseable schedule id are manual or backfill
+                # runs; never let them consume a shadow decision.
+                adhoc += 1
+                continue
+
             candidates = unmatched.get(schema_id, [])
-            best = min(candidates, key=lambda due: abs(due - job_time), default=None)
-            if best is not None and abs(best - job_time) <= tolerance:
+            best = min(candidates, key=lambda due: abs(due - fired_at), default=None)
+            if best is not None and abs(best - fired_at) <= tolerance:
                 candidates.remove(best)
                 matched += 1
-            elif schedule_fired:
-                temporal_only.append(schema_id)
             else:
-                # Unmatched runs with no parseable schedule id are manual or
-                # backfill runs; count them but keep them out of the mismatch math.
-                adhoc += 1
+                temporal_only.append(schema_id)
 
         shadow_only = [schema_id for schema_id, dues in unmatched.items() for _ in dues]
 

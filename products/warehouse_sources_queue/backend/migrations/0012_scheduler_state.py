@@ -32,7 +32,7 @@ def _create_scheduler_tables(apps, schema_editor):
             interval_seconds BIGINT NOT NULL,
             late_seconds DOUBLE PRECISION NOT NULL,
             observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            CONSTRAINT qsd_schema_window_uniq UNIQUE (schema_id, window_boundary)
+            CONSTRAINT qsd_schema_due_uniq UNIQUE (schema_id, due_at)
         )
     """)
     schema_editor.execute("""
@@ -93,9 +93,7 @@ class Migration(migrations.Migration):
                     options={
                         "db_table": "queueschedulerdecision",
                         "constraints": [
-                            models.UniqueConstraint(
-                                fields=("schema_id", "window_boundary"), name="qsd_schema_window_uniq"
-                            )
+                            models.UniqueConstraint(fields=("schema_id", "due_at"), name="qsd_schema_due_uniq")
                         ],
                         "indexes": [models.Index(fields=["observed_at"], name="qsd_observed_at_idx")],
                     },

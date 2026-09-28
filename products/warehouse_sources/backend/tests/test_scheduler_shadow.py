@@ -201,10 +201,15 @@ class TestEvaluateDue:
     def test_skip_reasons(self, team, job_status, sync_type_config, expected_decision):
         source = _create_source(team)
         schema = _create_schema(team, source, sync_type_config=sync_type_config)
-        if job_status is not None:
-            ExternalDataJob.objects.create(team=team, pipeline=source, schema=schema, status=job_status)
-
         now_epoch = int(time.time())
+        if job_status is not None:
+            job = ExternalDataJob.objects.create(team=team, pipeline=source, schema=schema, status=job_status)
+            if expected_decision == DECISION_SKIP_OVERLAP:
+                due_at = datetime.fromtimestamp(
+                    latest_fire_at(now_epoch, SchemaCadence(interval_seconds=21600, offset_seconds=0)), tz=UTC
+                )
+                ExternalDataJob.objects.filter(pk=job.pk).update(created_at=due_at - timedelta(seconds=1))
+
         result = async_to_sync(evaluate_due)([_due_row(str(schema.id), team.pk, now_epoch)], now_epoch)
 
         assert len(result.records) == 1
@@ -214,6 +219,20 @@ class TestEvaluateDue:
             latest_fire_at(now_epoch, SchemaCadence(interval_seconds=21600, offset_seconds=0)), tz=UTC
         )
         assert result.missed_windows == 0
+
+    def test_current_boundary_temporal_job_is_not_an_overlap(self, team):
+        source = _create_source(team)
+        schema = _create_schema(team, source)
+        now_epoch = int(time.time())
+        due_at = datetime.fromtimestamp(
+            latest_fire_at(now_epoch, SchemaCadence(interval_seconds=21600, offset_seconds=0)), tz=UTC
+        )
+        job = ExternalDataJob.objects.create(team=team, pipeline=source, schema=schema, status="Running")
+        ExternalDataJob.objects.filter(pk=job.pk).update(created_at=due_at)
+
+        result = async_to_sync(evaluate_due)([_due_row(str(schema.id), team.pk, now_epoch)], now_epoch)
+
+        assert [record.decision for record in result.records] == [DECISION_WOULD_FIRE]
 
     def test_unknown_schema_is_out_of_scope(self, team):
         now_epoch = int(time.time())
@@ -266,6 +285,40 @@ class TestShadowReport:
 
         assert "matched: 1" in output
         assert "shadow_only (shadow would fire, no job): 0" in output
+        assert "temporal_only (schedule-fired job, no decision): 0" in output
+        assert "adhoc (manual/backfill runs, excluded): 1" in output
+
+    def test_adhoc_job_does_not_consume_nearby_decision(self, team, monkeypatch):
+        db_url = get_test_database_url()
+        with psycopg.Connection.connect(db_url, autocommit=True) as conn:
+            ensure_scheduler_tables(conn)
+            conn.execute(f"TRUNCATE {SCHEDULER_DECISION_TABLE}")
+        monkeypatch.setattr(
+            "products.warehouse_sources.backend.management.commands.report_warehouse_scheduler_shadow"
+            ".WAREHOUSE_SOURCES_DATABASE_URL",
+            db_url,
+        )
+
+        source = _create_source(team)
+        schema = _create_schema(team, source)
+        due_at = (datetime.now(UTC) - timedelta(minutes=10)).replace(microsecond=0)
+        with psycopg.Connection.connect(db_url, autocommit=True) as conn:
+            conn.execute(
+                f"""
+                INSERT INTO {SCHEDULER_DECISION_TABLE}
+                    (team_id, schema_id, window_boundary, due_at, decision, interval_seconds, late_seconds)
+                VALUES (%(team_id)s, %(schema_id)s, %(due_at)s, %(due_at)s, 'would_fire', 21600, 1.0)
+                """,
+                {"team_id": team.pk, "schema_id": str(schema.id), "due_at": due_at},
+            )
+        ExternalDataJob.objects.create(team=team, pipeline=source, schema=schema, status="Running", workflow_id=None)
+
+        out = io.StringIO()
+        call_command("report_warehouse_scheduler_shadow", "--team-id", str(team.pk), stdout=out)
+        output = out.getvalue()
+
+        assert "matched: 0" in output
+        assert "shadow_only (shadow would fire, no job): 1" in output
         assert "temporal_only (schedule-fired job, no decision): 0" in output
         assert "adhoc (manual/backfill runs, excluded): 1" in output
 

@@ -255,8 +255,17 @@ def ensure_scheduler_tables(conn: psycopg.Connection[Any]) -> None:
             interval_seconds BIGINT NOT NULL,
             late_seconds DOUBLE PRECISION NOT NULL,
             observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            CONSTRAINT qsd_schema_window_uniq UNIQUE (schema_id, window_boundary)
+            CONSTRAINT qsd_schema_due_uniq UNIQUE (schema_id, due_at)
         )
+    """)
+    conn.execute(f"ALTER TABLE {SCHEDULER_DECISION_TABLE} DROP CONSTRAINT IF EXISTS qsd_schema_window_uniq")
+    conn.execute(f"""
+        DO $$ BEGIN
+            ALTER TABLE {SCHEDULER_DECISION_TABLE}
+                ADD CONSTRAINT qsd_schema_due_uniq UNIQUE (schema_id, due_at);
+        EXCEPTION
+            WHEN duplicate_object OR duplicate_table THEN NULL;
+        END $$
     """)
     conn.execute(f"CREATE INDEX IF NOT EXISTS qsd_observed_at_idx ON {SCHEDULER_DECISION_TABLE} (observed_at)")
 

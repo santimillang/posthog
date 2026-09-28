@@ -106,8 +106,7 @@ def latest_fire_at(now: int, cadence: SchemaCadence) -> int:
 
 
 def window_boundary(fire: int, cadence: SchemaCadence) -> int:
-    """The fire's offset-free window identity; phase 3 dedups enqueues on
-    (schema_id, window_boundary), so it must not move when the offset does."""
+    """The fire's offset-free cadence boundary, retained for comparison."""
     return fire - cadence.offset_seconds
 
 
@@ -148,13 +147,11 @@ def _fetch_due_scope(schema_ids: list[str]) -> dict[str, dict | None]:
     return {str(schema_id): config for schema_id, config in rows}
 
 
-def _fetch_running_schema_ids(schema_ids: list[str]) -> set[str]:
-    rows = (
-        ExternalDataJob.objects.filter(schema_id__in=schema_ids, status=ExternalDataJob.Status.RUNNING)
-        .values_list("schema_id", flat=True)
-        .distinct()
+def _fetch_running_jobs(schema_ids: list[str]) -> list[tuple[str, datetime]]:
+    rows = ExternalDataJob.objects.filter(schema_id__in=schema_ids, status=ExternalDataJob.Status.RUNNING).values_list(
+        "schema_id", "created_at"
     )
-    return {str(schema_id) for schema_id in rows}
+    return [(str(schema_id), created_at) for schema_id, created_at in rows]
 
 
 async def evaluate_due(due: list[DueSchedule], now_epoch: int) -> EvaluationResult:
@@ -170,7 +167,7 @@ async def evaluate_due(due: list[DueSchedule], now_epoch: int) -> EvaluationResu
 
     due_ids = [row.schema_id for row in due]
     scope_config = await database_sync_to_async_pool(_fetch_due_scope)(due_ids)
-    running = await database_sync_to_async_pool(_fetch_running_schema_ids)(due_ids)
+    running_jobs = await database_sync_to_async_pool(_fetch_running_jobs)(due_ids)
 
     records: list[DecisionRecord] = []
     missed_windows = 0
@@ -180,9 +177,17 @@ async def evaluate_due(due: list[DueSchedule], now_epoch: int) -> EvaluationResu
         stored_due_epoch = int(row.next_due_at.timestamp())
         missed_windows += max(0, (fire - stored_due_epoch) // cadence.interval_seconds)
 
+        # Only work that existed before this boundary can overlap it. The
+        # Temporal run fired for this boundary may already be RUNNING by the
+        # time the shadow tick evaluates, but it is the run being compared.
+        had_running_job_at_boundary = any(
+            schema_id == row.schema_id and created_at < datetime.fromtimestamp(fire, tz=UTC)
+            for schema_id, created_at in running_jobs
+        )
+
         if row.schema_id not in scope_config:
             decision = DECISION_SKIP_OUT_OF_SCOPE
-        elif row.schema_id in running:
+        elif had_running_job_at_boundary:
             decision = DECISION_SKIP_OVERLAP
         elif cdc_halted_from_config(scope_config[row.schema_id]):
             decision = DECISION_SKIP_CDC_HALTED

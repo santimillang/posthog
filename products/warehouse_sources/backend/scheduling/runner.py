@@ -161,21 +161,21 @@ class ShadowScheduler:
             now_epoch = int(time.time())
             async with conn.transaction():
                 due = await SchedulerStateTable.claim_due(conn, limit=self._config.claim_limit)
+                result = await evaluate_due(due, now_epoch)
+                inserted_records, refused = await SchedulerStateTable.insert_decisions(conn, list(result.records))
+
                 advances = []
                 for row in due:
                     cadence = SchemaCadence(interval_seconds=row.interval_seconds, offset_seconds=row.offset_seconds)
                     advances.append((row.schema_id, datetime.fromtimestamp(next_due_after(now_epoch, cadence), tz=UTC)))
                 await SchedulerStateTable.advance_states(conn, advances)
 
+                out_of_scope = [r.schema_id for r in result.records if r.decision == DECISION_SKIP_OUT_OF_SCOPE]
+                if out_of_scope:
+                    await SchedulerStateTable.delete_states(conn, out_of_scope)
+
             DUE_PER_TICK.observe(len(due))
-            result = await evaluate_due(due, now_epoch)
-            inserted, refused = await SchedulerStateTable.insert_decisions(conn, list(result.records))
-
-            out_of_scope = [r.schema_id for r in result.records if r.decision == DECISION_SKIP_OUT_OF_SCOPE]
-            if out_of_scope:
-                await SchedulerStateTable.delete_states(conn, out_of_scope)
-
-            for record in result.records:
+            for record in inserted_records:
                 FIRE_LATENESS_SECONDS.observe(record.late_seconds)
                 if record.decision == DECISION_WOULD_FIRE:
                     WOULD_FIRE_TOTAL.inc()
@@ -197,16 +197,23 @@ class ShadowScheduler:
                     )
             if refused:
                 DUPLICATE_WINDOWS_TOTAL.inc(refused)
-            if result.missed_windows:
-                MISSED_WINDOWS_TOTAL.inc(result.missed_windows)
+            due_by_schema = {row.schema_id: row for row in due}
+            inserted_missed_windows = 0
+            for record in inserted_records:
+                row = due_by_schema[record.schema_id]
+                inserted_missed_windows += max(
+                    0, (int(record.due_at.timestamp()) - int(row.next_due_at.timestamp())) // row.interval_seconds
+                )
+            if inserted_missed_windows:
+                MISSED_WINDOWS_TOTAL.inc(inserted_missed_windows)
 
             TICKS_TOTAL.labels(outcome="leader").inc()
             logger.info(
                 "scheduler_tick",
                 due=len(due),
-                decisions_inserted=inserted,
+                decisions_inserted=len(inserted_records),
                 duplicate_windows=refused,
-                missed_windows=result.missed_windows,
+                missed_windows=inserted_missed_windows,
                 refreshed=refresh_won,
             )
             health_reporter()

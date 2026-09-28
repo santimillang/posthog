@@ -327,11 +327,11 @@ class QueueSchedulerState(models.Model):
 
 
 class QueueSchedulerDecision(models.Model):
-    """Append-only shadow-scheduler decision per (schema, fire window).
+    """Append-only shadow-scheduler decision per (schema, due time).
 
-    The unique (schema_id, window_boundary) pair is the dedup identity the real
-    scheduler will enqueue on in a later phase; in shadow mode a refused insert
-    is only counted. All access is via raw SQL in ``core/scheduler_state.py``.
+    The unique (schema_id, due_at) pair allows a cadence offset change to fire
+    again inside the same offset-free boundary. All access is via raw SQL in
+    ``core/scheduler_state.py``.
     """
 
     team_id = models.BigIntegerField()
@@ -348,7 +348,7 @@ class QueueSchedulerDecision(models.Model):
     class Meta:
         db_table = "queueschedulerdecision"
         constraints = [
-            models.UniqueConstraint(fields=["schema_id", "window_boundary"], name="qsd_schema_window_uniq"),
+            models.UniqueConstraint(fields=["schema_id", "due_at"], name="qsd_schema_due_uniq"),
         ]
         indexes = [
             models.Index(fields=["observed_at"], name="qsd_observed_at_idx"),
