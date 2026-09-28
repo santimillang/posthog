@@ -135,9 +135,9 @@ function postHogDomain(host: string): string | null {
 
 /**
  * The origin of a Go gateway URL, or null unless it is a bare https origin on
- * the ai-gateway allowlist. Loopback passes only with `allowLoopback` (the
- * dev override). With `apiHost`, the gateway must share its PostHog domain,
- * so a prod bearer never reaches a dev host or the reverse.
+ * the ai-gateway allowlist with the default port. Loopback passes only with
+ * `allowLoopback` (the dev override). With `apiHost`, the gateway must share
+ * its PostHog domain, so a prod bearer never reaches a dev host or the reverse.
  */
 export function validateAiGatewayUrl(
   raw: string,
@@ -160,6 +160,7 @@ export function validateAiGatewayUrl(
     return options.allowLoopback && httpish ? origin : null;
   }
   if (parsed.protocol !== "https:" || !AI_GATEWAY_HOSTS.has(host)) return null;
+  if (parsed.port !== "") return null;
   if (options.apiHost !== undefined) {
     const api = safeUrl(options.apiHost);
     const apiHost = api?.hostname.replace(/\.+$/, "").toLowerCase() ?? "";

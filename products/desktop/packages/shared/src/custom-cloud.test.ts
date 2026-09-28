@@ -150,6 +150,7 @@ describe("validateAiGatewayUrl", () => {
   it.each([
     "https://ai-gateway.us.posthog.com",
     "https://ai-gateway.eu.posthog.com/",
+    "https://ai-gateway.us.posthog.com:443",
     "https://ai-gateway.dev.posthog.dev",
     "https://AI-GATEWAY.US.POSTHOG.COM.",
   ])("accepts %s", (raw) => {
@@ -168,6 +169,7 @@ describe("validateAiGatewayUrl", () => {
     "https://ai-gateway.us.posthog.com.evil.example",
     "https://x-ai-gateway.us.posthog.com.evil.example",
     "https://1.2.3.4",
+    "https://ai-gateway.us.posthog.com:8443",
     "https://ai-gateway.us.posthog.com/v1",
     "https://ai-gateway.us.posthog.com?x=1",
     "https://user:pw@ai-gateway.us.posthog.com",

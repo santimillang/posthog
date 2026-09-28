@@ -1,11 +1,8 @@
 import http from "node:http";
 import type { RootLogger } from "@posthog/di/logger";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  AuthProxyService,
-  SESSION_MAX_BODY_BYTES,
-  SESSION_TIMEOUTS,
-} from "./auth-proxy";
+import { AuthProxyService } from "./auth-proxy";
+import { SESSION_MAX_BODY_BYTES, SESSION_TIMEOUTS } from "./gateway-session";
 import type {
   AuthProxyAuth,
   GatewayCredential,
