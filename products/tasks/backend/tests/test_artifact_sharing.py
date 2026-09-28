@@ -188,7 +188,7 @@ class TestTaskArtifactSharing(APIBaseTest):
         assert (state["shared_artifact_id"], state["latest_artifact_id"]) == ("art-2", "art-3")
         assert self._shared_payload(access_token)["task_artifact"]["markdown"] == "# Final\n"
 
-        published = self.client.post(f"{self._sharing_url('art-3')}publish/")
+        published = self.client.post(f"{self._sharing_url('art-3')}/publish/")
 
         assert published.status_code == status.HTTP_200_OK, published.json()
         assert published.json()["shared_artifact_id"] == "art-3"
@@ -205,7 +205,7 @@ class TestTaskArtifactSharing(APIBaseTest):
         assert (state["shared_artifact_id"], state["latest_artifact_id"]) == ("art-2", "art-2")
         assert self.client.get(self._sharing_url("att-1")).status_code == status.HTTP_404_NOT_FOUND
 
-        published = self.client.post(f"{self._sharing_url('art-2')}publish/")
+        published = self.client.post(f"{self._sharing_url('art-2')}/publish/")
 
         assert published.status_code == status.HTTP_200_OK, published.json()
         assert published.json()["shared_artifact_id"] == "art-2"
@@ -228,7 +228,7 @@ class TestTaskArtifactSharing(APIBaseTest):
                 _entry("art-3", "report.md", "artifacts/report-v3.md", "text/markdown", "2026-03-01T00:00:00+00:00")
             )
             self.newer_run.save(update_fields=["artifacts"])
-            published = self.client.post(f"{self._sharing_url('art-3')}publish/")
+            published = self.client.post(f"{self._sharing_url('art-3')}/publish/")
             assert published.status_code == status.HTTP_200_OK, published.json()
 
         anchor = SharedTaskArtifact.objects.for_team(self.team.id).get(task=self.task, name="report.md")

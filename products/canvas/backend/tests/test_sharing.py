@@ -152,7 +152,7 @@ class TestCanvasSharingApi(CanvasSharingTestBase):
         with team_scope(self.team.id):
             assert Canvas.objects.get(id=canvas_id).shared_build_id == first.id
 
-        published = self.client.post(f"{self._sharing_url(canvas_id)}publish/")
+        published = self.client.post(f"{self._sharing_url(canvas_id)}/publish/")
         assert published.status_code == status.HTTP_200_OK, published.json()
         with team_scope(self.team.id):
             assert Canvas.objects.get(id=canvas_id).shared_build_id == second.id
