@@ -306,10 +306,6 @@ def _untrack(team_ids: set[int], *, expired_before: float) -> None:
         client.zrem(LLM_GATEWAY_QUOTA_CACHE_EXPIRY_SORTED_SET, *(str(team_id) for team_id in expired))
 
 
-# django_redis writes KEY_PREFIX:VERSION:key; the gateway derives the same prefix.
-_DJANGO_REDIS_KEY_PREFIX = "posthog:1:"
-
-
 def _missing_blobs(team_ids: set[int]) -> set[int]:
     missing: set[int] = set()
     ordered = sorted(team_ids)
@@ -377,6 +373,8 @@ def get_team_quota_blob(team: Team | int) -> dict[str, Any] | None:
 
 
 def quota_blob_ttl_remaining(team: Team | int) -> int | None:
-    client = get_client(team_llm_gateway_quota_hypercache.redis_url)
-    ttl = client.ttl(_DJANGO_REDIS_KEY_PREFIX + team_llm_gateway_quota_hypercache.get_cache_key(team))
+    cache = team_llm_gateway_quota_hypercache.cache_client
+    ttl = get_client(team_llm_gateway_quota_hypercache.redis_url).ttl(
+        cache.make_key(team_llm_gateway_quota_hypercache.get_cache_key(team))
+    )
     return None if ttl is None or ttl < 0 else int(ttl)

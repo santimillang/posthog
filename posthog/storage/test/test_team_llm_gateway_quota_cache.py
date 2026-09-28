@@ -30,6 +30,7 @@ from posthog.storage.team_llm_gateway_quota_cache import (
     project_teams_quota_by_token,
     projected_team_ids,
     quota_blob_ttl,
+    quota_blob_ttl_remaining,
     reconcile_quota_projection,
     team_llm_gateway_quota_hypercache as hypercache,
 )
@@ -153,6 +154,19 @@ class TestProjectTeamQuota(QuotaProjectionTestMixin):
         ttl = w.call_args.kwargs["ttl"]
         self.assertAlmostEqual(ttl, 3 * 24 * 3600 + LLM_GATEWAY_QUOTA_TTL_MARGIN_SECONDS, delta=5)
         self.assertTrue(w.call_args.kwargs["track_expiry"])
+
+    def test_ttl_remaining_reads_the_key_the_cache_writes(self, mock_settings):
+        client = get_client(hypercache.redis_url)
+        key = hypercache.cache_client.make_key(hypercache.get_cache_key(self.team))
+        client.delete(key)
+        self.assertIsNone(quota_blob_ttl_remaining(self.team))
+        client.set(key, b"blob", ex=300)
+        try:
+            remaining = quota_blob_ttl_remaining(self.team)
+        finally:
+            client.delete(key)
+        assert remaining is not None
+        self.assertAlmostEqual(remaining, 300, delta=5)
 
     def test_both_buckets_take_the_latest_end(self, mock_settings):
         self._enable(mock_settings)

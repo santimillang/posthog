@@ -35,7 +35,7 @@ class CodeUsageStatus:
     is_pro: bool
 
 
-def get_posthog_code_usage(user, team_id: int) -> CodeUsageStatus | None:
+def get_posthog_code_usage(team_id: int) -> CodeUsageStatus | None:
     """None (fail open) on any failure, so a Redis or DB error never blocks task creation."""
     from posthog.models import Team  # noqa: PLC0415
 
@@ -192,7 +192,7 @@ def usage_limit_response(user, team_id: int) -> Response | None:
         observe_code_usage_gate_check(outcome="org_deactivated")
         return organization_deactivated_response()
 
-    usage = get_posthog_code_usage(user, team_id)
+    usage = get_posthog_code_usage(team_id)
     if usage is None:
         observe_code_usage_gate_check(outcome="fail_open")
         return None

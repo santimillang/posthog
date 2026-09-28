@@ -15506,7 +15506,7 @@ class TestGetPosthogCodeUsage(TestCase):
         self.organization.usage = {"period": ["2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"]}
         self.organization.save()
 
-        usage = get_posthog_code_usage(MagicMock(), self.team.id)
+        usage = get_posthog_code_usage(self.team.id)
 
         assert usage == CodeUsageStatus(
             is_rate_limited=True, limit_type=None, reset_at="2026-10-01T00:00:00+00:00", is_pro=False
@@ -15515,7 +15515,7 @@ class TestGetPosthogCodeUsage(TestCase):
 
     @patch("ee.billing.quota_limiting.is_team_over_credit_budget", return_value=True)
     def test_unknown_period_leaves_reset_unset(self, _mock_over):
-        usage = get_posthog_code_usage(MagicMock(), self.team.id)
+        usage = get_posthog_code_usage(self.team.id)
 
         assert usage is not None
         self.assertTrue(usage.is_rate_limited)
@@ -15523,16 +15523,16 @@ class TestGetPosthogCodeUsage(TestCase):
 
     @patch("ee.billing.quota_limiting.is_team_over_credit_budget", return_value=False)
     def test_open_bucket_is_not_rate_limited(self, _mock_over):
-        usage = get_posthog_code_usage(MagicMock(), self.team.id)
+        usage = get_posthog_code_usage(self.team.id)
 
         assert usage == CodeUsageStatus(is_rate_limited=False, limit_type=None, reset_at=None, is_pro=False)
 
     @patch("ee.billing.quota_limiting.is_team_over_credit_budget", side_effect=Exception("redis down"))
     def test_fails_open_on_lookup_error(self, _mock_over):
-        self.assertIsNone(get_posthog_code_usage(MagicMock(), self.team.id))
+        self.assertIsNone(get_posthog_code_usage(self.team.id))
 
     def test_fails_open_for_an_unknown_team(self):
-        self.assertIsNone(get_posthog_code_usage(MagicMock(), self.team.id + 10_000))
+        self.assertIsNone(get_posthog_code_usage(self.team.id + 10_000))
 
 
 class TestUsageLimitResponse(TestCase):
