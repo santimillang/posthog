@@ -2168,7 +2168,7 @@ export const ExperimentMetricsRecalculationRequestTriggerEnumApi = {
  * Request body for triggering a metrics recalculation.
  */
 export interface RecalculateMetricsRequestApi {
-    /** What triggered this recalculation (manual is the default for user-initiated runs). Only client triggers are accepted; agent_mcp and timeseries_sync are set by the server.
+    /** What triggered this recalculation (manual is the default for user-initiated runs). Only client triggers are accepted; agent_mcp, timeseries_sync and scheduled are set by the server.
      *
      * * `manual` - Manual
      * * `manual_retry` - Manual Retry
@@ -2210,6 +2210,7 @@ export const MetricsRecalculationStatusEnumApi = {
  * * `experiment_stop` - Experiment Stop
  * * `experiment_update` - Experiment Update
  * * `timeseries_sync` - Timeseries Sync
+ * * `scheduled` - Scheduled
  */
 export type ExperimentMetricsRecalculationTriggerEnumApi =
     (typeof ExperimentMetricsRecalculationTriggerEnumApi)[keyof typeof ExperimentMetricsRecalculationTriggerEnumApi]
@@ -2229,6 +2230,7 @@ export const ExperimentMetricsRecalculationTriggerEnumApi = {
     ExperimentStop: 'experiment_stop',
     ExperimentUpdate: 'experiment_update',
     TimeseriesSync: 'timeseries_sync',
+    Scheduled: 'scheduled',
 } as const
 
 /**
@@ -2332,7 +2334,8 @@ export interface ExperimentMetricsRecalculationApi {
      * * `experiment_launch` - Experiment Launch
      * * `experiment_stop` - Experiment Stop
      * * `experiment_update` - Experiment Update
-     * * `timeseries_sync` - Timeseries Sync */
+     * * `timeseries_sync` - Timeseries Sync
+     * * `scheduled` - Scheduled */
     readonly trigger: ExperimentMetricsRecalculationTriggerEnumApi
     /** When the job was created */
     readonly created_at: string

@@ -40883,6 +40883,7 @@ export namespace Schemas {
      * * `experiment_stop` - Experiment Stop
      * * `experiment_update` - Experiment Update
      * * `timeseries_sync` - Timeseries Sync
+     * * `scheduled` - Scheduled
      */
     export type ExperimentMetricsRecalculationTriggerEnum = typeof ExperimentMetricsRecalculationTriggerEnum[keyof typeof ExperimentMetricsRecalculationTriggerEnum];
 
@@ -40902,6 +40903,7 @@ export namespace Schemas {
       ExperimentStop: 'experiment_stop',
       ExperimentUpdate: 'experiment_update',
       TimeseriesSync: 'timeseries_sync',
+      Scheduled: 'scheduled',
     } as const;
 
     /**
@@ -40991,7 +40993,8 @@ export namespace Schemas {
        * * `experiment_launch` - Experiment Launch
        * * `experiment_stop` - Experiment Stop
        * * `experiment_update` - Experiment Update
-       * * `timeseries_sync` - Timeseries Sync */
+       * * `timeseries_sync` - Timeseries Sync
+       * * `scheduled` - Scheduled */
       readonly trigger: ExperimentMetricsRecalculationTriggerEnum;
       /** When the job was created */
       readonly created_at: string;
@@ -86406,7 +86409,7 @@ export namespace Schemas {
      * Request body for triggering a metrics recalculation.
      */
     export interface RecalculateMetricsRequest {
-      /** What triggered this recalculation (manual is the default for user-initiated runs). Only client triggers are accepted; agent_mcp and timeseries_sync are set by the server.
+      /** What triggered this recalculation (manual is the default for user-initiated runs). Only client triggers are accepted; agent_mcp, timeseries_sync and scheduled are set by the server.
        *
        * * `manual` - Manual
        * * `manual_retry` - Manual Retry
