@@ -45,7 +45,9 @@ class TestPlatformAlertLifecycle(ClickhouseTestMixin, APIBaseTest):
             "consecutive_failures": 0,
         }
         fields.update(overrides)
-        record_outcomes(self.team.id, [PlatformAlertOutcome(**fields)], self.cutoff)
+        # History rides `transaction.on_commit`, which a `TestCase` transaction never reaches.
+        with self.captureOnCommitCallbacks(execute=True):
+            record_outcomes(self.team.id, [PlatformAlertOutcome(**fields)], self.cutoff)
 
     def test_a_disabling_outcome_stops_the_configuration_being_discovered(self) -> None:
         self._record(new_state="broken", notified=False, consecutive_failures=5, disable=True)
