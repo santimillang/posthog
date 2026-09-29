@@ -544,6 +544,7 @@ export class AgentServer {
   private stampedRunTraceId: string | null = null;
   private slackArtifactDelivery: SlackArtifactDelivery | null = null;
   private slackChartDelivery = false;
+  private slackProgressChecklist = false;
   private slackReplyContext = false;
   private taskRepositories: string[] = [];
   // Reset per session. `evaluatedPrUrls` dedupes per URL; `prAttributionChain` serializes
@@ -2131,6 +2132,9 @@ export class AgentServer {
     this.slackArtifactDelivery = readSlackArtifactDelivery(preTaskRun);
     this.slackChartDelivery = readSlackChartDelivery(preTaskRun);
     this.slackReplyContext = preTaskRun?.state.slack_reply_context === true;
+    // Set by the backend on runs whose Slack reply streams the agent's task list.
+    this.slackProgressChecklist =
+      preTaskRun?.state.slack_app_agent_design_enabled === true;
 
     // Web backlink to the inbox report that spawned this task, so the
     // auto-generated PR can point back at it. Built from the same pieces as the
@@ -4572,6 +4576,7 @@ export class AgentServer {
       shouldAutoPublish: this.shouldAutoPublishCloudChanges(),
       slackArtifactDelivery: this.slackArtifactDelivery,
       slackChartDelivery: this.slackChartDelivery,
+      slackProgressChecklist: this.slackProgressChecklist,
       storeSkillsInstalledCount: this.storeSkillsInstalledCount,
       taskId: this.config.taskId,
       taskRepositories: this.taskRepositories,
