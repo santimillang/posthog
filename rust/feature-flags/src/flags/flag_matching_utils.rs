@@ -752,6 +752,12 @@ fn track_db_error(error_type: &str, timeout_subtype: Option<&str>, operation: &s
     common_metrics::inc(FLAG_DATABASE_ERROR_COUNTER, &labels, 1);
 }
 
+pub(crate) fn track_unretried_db_error(error: &FlagError, operation: &str) {
+    if let Some((error_type, timeout_subtype)) = classify_db_error(error) {
+        track_db_error(error_type, timeout_subtype, operation, false);
+    }
+}
+
 /// `RetryIf` evaluates its condition before it checks whether any delays remain. The error alone
 /// therefore does not tell an attempt whether a retry follows it. The caller can also drop the
 /// call during the backoff, for example when the request times out. A failed attempt therefore
