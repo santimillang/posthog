@@ -932,7 +932,7 @@ class TestProperty(BaseTest):
 
     def test_selector_to_expr_keeps_legacy_matches_for_a_class_before_an_attribute(self):
         tail = "[^;]*?($|;|:([^;^\\s]*(;|$|\\s)))"
-        within = '(?:[^;"]|"(?:\\\\.|[^"])*")*?'
+        within = '(?:[^;"]|"(?:\\\\.|[^"\\\\])*")*?'
         self.assertEqual(
             self._selector_to_expr(".icon-button[aria-label='Close']"),
             clear_locations(
