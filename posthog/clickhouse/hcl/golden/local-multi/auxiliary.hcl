@@ -1200,7 +1200,7 @@ database "posthog" {
     column "state" {
       type = "LowCardinality(String)"
     }
-    column "firing_started_at" {
+    column "episode_started_at" {
       type = "Nullable(DateTime64(6, 'UTC'))"
     }
     column "value" {
@@ -2359,7 +2359,7 @@ database "posthog" {
     column "state" {
       type = "LowCardinality(String)"
     }
-    column "firing_started_at" {
+    column "episode_started_at" {
       type = "Nullable(DateTime64(6, 'UTC'))"
     }
     column "value" {
