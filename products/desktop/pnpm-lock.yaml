@@ -1421,8 +1421,8 @@ importers:
         specifier: ^11.17.0
         version: 11.17.0
       posthog-js:
-        specifier: ^1.434.14
-        version: 1.434.14(@types/react@19.2.17)(react@19.2.6)
+        specifier: ^1.435.0
+        version: 1.435.0(@types/react@19.2.17)(react@19.2.6)
       radix-themes-tw:
         specifier: 0.2.3
         version: 0.2.3
@@ -1717,8 +1717,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared
       posthog-js:
-        specifier: ^1.434.14
-        version: 1.434.14(@types/react@19.2.17)(react@19.2.6)
+        specifier: ^1.435.0
+        version: 1.435.0(@types/react@19.2.17)(react@19.2.6)
       react:
         specifier: 19.2.6
         version: 19.2.6
@@ -6219,6 +6219,9 @@ packages:
 
   '@posthog/types@1.412.4':
     resolution: {integrity: sha512-Q7lV9O9TbLngjOYw1ucm3bS3tn48xb1B4ZQdDy8gv7yfKe99hCTeWYG4xZ36nJM80VxpTF9TriiJt5hngDOkBg==}
+
+  '@posthog/types@1.413.0':
+    resolution: {integrity: sha512-tYAVzNojWckuG/wxBB0fwE70sFruQQq4xbhkci7eH2ARU3mMfUTkvpN1HwBMpm0AtbxidLiH0IFvagmdJ8opPw==}
 
   '@preact/signals-core@1.13.0':
     resolution: {integrity: sha512-slT6XeTCAbdql61GVLlGU4x7XHI7kCZV5Um5uhE4zLX4ApgiiXc0UYFvVOKq06xcovzp7p+61l68oPi563ARKg==}
@@ -13670,6 +13673,7 @@ packages:
 
   path-dirname@1.0.2:
     resolution: {integrity: sha512-ALzNPpyNq9AqXMBjeymIjFDAkAFH06mHJH/cSBHAgU0s4vfpBn6b2nf8tiRLvagKD8RbTpq2FKTBg7cl9l3c7Q==}
+    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   path-exists@4.0.0:
     resolution: {integrity: sha512-ak9Qy5Q7jYb2Wwcey5Fpvg2KoAc/ZIhLSLOSBmRmygPsGwkVVt0fZa0qrtMz+m6tJTAHfZQ8FnmB4MG4LWy7/w==}
@@ -13855,8 +13859,8 @@ packages:
     resolution: {integrity: sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==}
     engines: {node: ^10 || ^12 || >=14}
 
-  posthog-js@1.434.14:
-    resolution: {integrity: sha512-x1ilSlqpMIYVXq5oerLPRXx4P0sHfTuS43YtCuVkI7Myi5FSeU6lVDitoGZvfhgggc5SFEcKD300l7OGLTDBwQ==}
+  posthog-js@1.435.0:
+    resolution: {integrity: sha512-RXcsd0vssNDNAAMz6t6RTaen2QORqn90poQVoZi25ftXCF9Ct1CXuMl8fnkPYxmtP6tkTdbnBehbx07b/b/+5w==}
     peerDependencies:
       '@types/react': ^19.2.15
       react: 19.2.6
@@ -20850,7 +20854,7 @@ snapshots:
   '@posthog/browser-common@0.9.0':
     dependencies:
       '@posthog/core': 1.55.2
-      '@posthog/types': 1.412.4
+      '@posthog/types': 1.413.0
 
   '@posthog/cli@0.16.2':
     dependencies:
@@ -20926,6 +20930,8 @@ snapshots:
       rollup: 4.62.2
 
   '@posthog/types@1.412.4': {}
+
+  '@posthog/types@1.413.0': {}
 
   '@preact/signals-core@1.13.0': {}
 
@@ -29921,11 +29927,11 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  posthog-js@1.434.14(@types/react@19.2.17)(react@19.2.6):
+  posthog-js@1.435.0(@types/react@19.2.17)(react@19.2.6):
     dependencies:
       '@posthog/browser-common': 0.9.0
       '@posthog/core': 1.55.2
-      '@posthog/types': 1.412.4
+      '@posthog/types': 1.413.0
       core-js: 3.50.0
       dompurify: 3.4.13
       fflate: 0.4.8
