@@ -136,6 +136,9 @@ class PlatformAlertCheckInput:
     snooze_until: datetime | None
     # Every label set's state. The flat fields above are the root group, kept for ungrouped sources.
     groups: tuple[PlatformAlertGroupState, ...] = ()
+    # "threshold" compares the value against the bounds above; "hog" runs the compiled program.
+    condition_type: str = "threshold"
+    condition_bytecode: list[Any] | None = None
 
     @property
     def filters(self) -> dict[str, Any]:
@@ -163,6 +166,8 @@ class PlatformAlertUpsert:
     schedule_restriction: dict[str, Any] | None
     next_check_at: datetime | None
     snooze_until: datetime | None
+    condition_type: str = "threshold"
+    condition_source: str | None = None
 
 
 class SkipReason(StrEnum):
@@ -174,6 +179,8 @@ class SkipReason(StrEnum):
 
     BROKEN_CONFIG = "broken_config"
     QUERY_FAILED = "query_failed"
+    CONDITION_FAILED = "condition_failed"
+    CONDITION_BUDGET = "condition_budget"
 
 
 class MuteReason(StrEnum):
