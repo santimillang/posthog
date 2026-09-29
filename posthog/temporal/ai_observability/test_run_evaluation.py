@@ -212,7 +212,7 @@ def test_system_one_categorical_results_use_category_keys_without_boolean_probab
         "output_type": "categorical",
         "output_config": {"options": options, "selection_mode": selection_mode, "allows_na": allows_na},
     }
-    answers: dict[str, Any] = (
+    answers: dict[str, dict[str, str | float | dict[str, float]]] = (
         {"category": {"choice": "resolved", "confidence": 0.8, "probabilities": {"resolved": 0.8, "applicable": 0.2}}}
         if selection_mode == "single"
         else {f"category_{index}": {"noul": probability} for index, probability in enumerate(probabilities)}
