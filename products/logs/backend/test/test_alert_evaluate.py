@@ -12,7 +12,7 @@ from posthog.hogql.errors import ExposedHogQLError
 
 from posthog.models.scoping import team_scope
 
-from products.alerts.backend.facade.contracts import SourceBatchEvaluation, SourceKind
+from products.alerts.backend.facade.contracts import AlertEventKind, SourceBatchEvaluation, SourceKind
 from products.alerts.backend.facade.platform_alerts import due_checks, record_outcomes
 from products.alerts.backend.facade.temporal import SOURCE_EVALUATION_TIMEOUT
 from products.alerts.backend.models import PlatformAlert, PlatformAlertConfiguration
@@ -82,7 +82,7 @@ class TestLogsAlertEvaluation(APIBaseTest):
         evaluation, _ = self._run(configuration)
         self._record(evaluation)
 
-        assert [t.notification for preview in evaluation.previews for t in preview.transitions] == ["fire"]
+        assert [t.kind for preview in evaluation.previews for t in preview.transitions] == [AlertEventKind.FIRING]
         with team_scope(self.team.id):
             alert = PlatformAlert.objects.get(configuration=configuration, grouping_key="")
             configuration.refresh_from_db()

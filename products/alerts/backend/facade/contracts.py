@@ -157,6 +157,25 @@ class MuteReason(StrEnum):
     QUIET_HOURS = "quiet_hours"
 
 
+class AlertEventKind(StrEnum):
+    """What one evaluation announced about an alert.
+
+    `CHECK` is an evaluation that announced nothing, which includes one that moved the alert while
+    a cooldown or a mute held the notification back. Read `previous_state` and `state` to find the
+    moves, because counting `RESOLVED` rows misses every recovery that was suppressed.
+
+    A source reports the kind rather than the platform deriving it: the machine already decided
+    what to announce, and deriving it again from the states would be a second implementation of
+    that decision.
+    """
+
+    CHECK = "check"
+    FIRING = "firing"
+    RESOLVED = "resolved"
+    ERRORED = "errored"
+    BROKEN = "broken"
+
+
 @frozen
 class PlatformAlertOutcome:
     """What one check decided. The platform turns this into rows.
@@ -176,11 +195,47 @@ class PlatformAlertOutcome:
 
 @frozen
 class GroupTransition:
-    """One transition a delivery would carry. `grouping_key` is empty until a source groups,
-    so delivery reads a list of one today and a list of N when fan-out ships."""
+    """One group's transition, as delivery reads it.
+
+    Carries the facts a message states rather than a reference to them, so what a message
+    claims was breached cannot change between the check and a retried send. `grouping_key` is
+    empty until a source groups, so delivery reads a list of one today and a list of N when
+    fan-out ships.
+    """
 
     grouping_key: str
-    notification: str
+    kind: AlertEventKind
+    previous_state: str
+    state: str
+    value: float | None
+    labels: dict[str, str]
+    condition: dict[str, Any]
+    source_config: dict[str, Any]
+    error_message: str | None
+
+
+@frozen
+class Notification:
+    """One conversation, and every transition it announces.
+
+    `notification_key` is empty while one message carries one group, and reaches no table until
+    fan-in ships. Delivery already loops over these, so the policy that decides how far to
+    collapse changes in one place rather than in every transport.
+    """
+
+    notification_key: str
+    transitions: tuple[GroupTransition, ...]
+
+
+@frozen
+class EvaluationAnnouncement:
+    """What one evaluation left for a destination to say."""
+
+    alert_name: str
+    # Evaluation-level, so it sits here rather than on a transition: a failed check fails the
+    # whole evaluation, and every group in one announcement saw the same count.
+    consecutive_failures: int
+    notifications: tuple[Notification, ...]
 
 
 @frozen
