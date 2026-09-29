@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from django.test import override_settings
 
-import requests
 import posthoganalytics
+from aioresponses import aioresponses
 from asgiref.sync import async_to_sync, sync_to_async
 from parameterized import parameterized
 from pydantic import ValidationError as PydanticValidationError
@@ -143,9 +143,6 @@ def test_system_one_judge_emits_boolean_probability_without_reasoning(
         },
         "usage": usage,
     }
-    response = requests.Response()
-    response.status_code = 200
-    response._content = json.dumps(response_body).encode()
     evaluation = {
         "id": "test-evaluation",
         "name": "Politeness",
@@ -159,8 +156,9 @@ def test_system_one_judge_emits_boolean_probability_without_reasoning(
         patch(
             "posthog.temporal.ai_observability.evaluation_llm_judge.system_one_evaluations_enabled", return_value=True
         ),
-        patch("posthog.egress.typesafe.client._send_system_one", return_value=response) as request,
+        aioresponses() as request,
     ):
+        request.post(f"{base_url}/systemone", payload=response_body)
         spec.return_value.resolve.return_value = resolved
         result = call_llm_judge(
             evaluation=evaluation,
@@ -169,8 +167,8 @@ def test_system_one_judge_emits_boolean_probability_without_reasoning(
             allows_na=allows_na,
         )
 
-    assert request.call_args.kwargs["url"] == f"{base_url}/systemone"
-    assert request.call_args.kwargs["body"]["model"] == model
+    sent = next(iter(request.requests.values()))[0].kwargs
+    assert sent["json"]["model"] == model
     assert result["verdict"] is verdict
     assert result["reasoning"] == ""
     assert result.get("probability") == (probability if verdict is not None else None)
@@ -186,6 +184,80 @@ def test_system_one_judge_emits_boolean_probability_without_reasoning(
     assert properties["$ai_evaluation_key_type"] == "byok"
 
 
+@pytest.mark.parametrize(
+    "selection_mode,probabilities,allows_na,applicable,expected",
+    [
+        ("single", [0.8, 0.2], False, True, ["resolved"]),
+        ("single", [0.8, 0.2], True, False, None),
+        ("multiple", [0.5, 0.9], False, True, ["resolved", "applicable"]),
+        ("multiple", [0.49, 0.9], True, True, ["applicable"]),
+        ("multiple", [0.1, 0.2], True, True, []),
+        ("multiple", [0.9, 0.9], True, False, None),
+    ],
+)
+def test_system_one_categorical_results_use_category_keys_without_boolean_probability(
+    selection_mode: str,
+    probabilities: list[float],
+    allows_na: bool,
+    applicable: bool,
+    expected: list[str] | None,
+) -> None:
+    options = [{"key": "resolved", "label": "Resolved issue"}, {"key": "applicable", "label": "Relevant reply"}]
+    evaluation = {
+        "id": "test-evaluation",
+        "name": "Response categories",
+        "team_id": 1,
+        "evaluation_type": "llm_judge",
+        "evaluation_config": {"prompt": "Classify the response."},
+        "output_type": "categorical",
+        "output_config": {"options": options, "selection_mode": selection_mode, "allows_na": allows_na},
+    }
+    answers: dict[str, Any] = (
+        {"category": {"choice": "resolved", "confidence": 0.8, "probabilities": {"resolved": 0.8, "applicable": 0.2}}}
+        if selection_mode == "single"
+        else {f"category_{index}": {"noul": probability} for index, probability in enumerate(probabilities)}
+    )
+    if allows_na:
+        answers["applicable"] = {"noul": 0.9 if applicable else 0.1}
+    key = MagicMock(
+        provider="system_one",
+        encrypted_config={"api_key": "example-token", "base_url": "https://decisions.example.com/v1"},
+    )
+    with (
+        patch("posthog.security.url_validation.resolve_host_ips", return_value={ip_address("8.8.8.8")}),
+        patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True),
+        patch("posthog.temporal.ai_observability.evaluation_llm_judge.model_spec") as spec,
+        patch(
+            "posthog.temporal.ai_observability.evaluation_llm_judge.system_one_evaluations_enabled", return_value=True
+        ),
+        aioresponses() as requests,
+    ):
+        spec.return_value.resolve.return_value = MagicMock(
+            provider="system_one", model="custom-model", provider_key=key, is_byok=True
+        )
+        requests.post(
+            "https://decisions.example.com/v1/systemone", payload={"model": "custom-model", "answers": answers}
+        )
+        result = call_llm_judge(evaluation=evaluation, system_prompt="", user_prompt="Hello!", allows_na=allows_na)
+
+    sent = next(iter(requests.requests.values()))[0].kwargs["json"]
+    assert sent["state"] == "Hello!"
+    if selection_mode == "single":
+        assert sent["questions"]["category"]["criteria"] == {option["key"]: option["label"] for option in options}
+    else:
+        assert sent["questions"]["category_0"]["criteria"]["true"] == "Matches category: Resolved issue"
+    assert result["result_type"] == "categorical"
+    assert result.get("categories") == expected
+    assert "probability" not in result
+    assert "verdict" not in result
+    assert result["input_tokens"] is None
+    assert result["reasoning"] == ""
+    properties = build_evaluation_event_properties(evaluation, result, datetime(2026, 1, 1, tzinfo=UTC))
+    assert properties.get("$ai_evaluation_categorical_result") == expected
+    assert properties["$ai_evaluation_applicable"] is applicable
+    assert "$ai_evaluation_probability" not in properties
+
+
 def test_system_one_numeric_mapping_is_not_enabled() -> None:
     with (
         patch("posthog.security.url_validation.resolve_host_ips", return_value={ip_address("8.8.8.8")}),
@@ -194,7 +266,7 @@ def test_system_one_numeric_mapping_is_not_enabled() -> None:
         patch(
             "posthog.temporal.ai_observability.evaluation_llm_judge.system_one_evaluations_enabled", return_value=True
         ),
-        patch("posthog.egress.typesafe.client._send_system_one") as request,
+        patch("aiohttp.ClientSession.request", new_callable=AsyncMock) as request,
     ):
         spec.return_value.resolve.return_value = MagicMock(provider="system_one")
         result = call_llm_judge(
@@ -217,7 +289,7 @@ def test_system_one_restricted_connection_does_not_send_evaluation_data(base_url
         patch("posthog.temporal.ai_observability.evaluation_llm_judge.model_spec") as spec,
         patch("products.ai_observability.backend.llm.system_one.Team.objects.only") as teams,
         patch("products.ai_observability.backend.llm.system_one.get_feature_flag_or_none", return_value=flag),
-        patch("posthog.egress.typesafe.client._send_system_one") as request,
+        patch("aiohttp.ClientSession.request", new_callable=AsyncMock) as request,
     ):
         teams.return_value.get.return_value = Team(id=1, organization_id=uuid.uuid4(), uuid=uuid.uuid4())
         spec.return_value.resolve.return_value = MagicMock(
@@ -249,9 +321,6 @@ def test_system_one_rejections_distinguish_blocked_endpoints_from_bad_inputs(
         provider="system_one",
         encrypted_config={"api_key": "example-token", "base_url": "https://decisions.example.com/v1"},
     )
-    response = requests.Response()
-    response.status_code = status
-    response._content = b"Invalid request"
     with (
         patch("posthog.security.url_validation.resolve_host_ips", return_value={ip_address("8.8.8.8")}),
         patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True),
@@ -259,8 +328,9 @@ def test_system_one_rejections_distinguish_blocked_endpoints_from_bad_inputs(
         patch(
             "posthog.temporal.ai_observability.evaluation_llm_judge.system_one_evaluations_enabled", return_value=True
         ),
-        patch("posthog.egress.typesafe.client._send_system_one", return_value=response),
+        aioresponses() as request,
     ):
+        request.post("https://decisions.example.com/v1/systemone", status=status, body="Invalid request")
         spec.return_value.resolve.return_value = MagicMock(
             provider="system_one", model="example-judge-v1", provider_key=key, is_byok=True
         )

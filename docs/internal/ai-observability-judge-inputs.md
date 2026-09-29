@@ -65,7 +65,12 @@ The evaluation integration uses Noul for boolean outputs, with the same formatte
 The integration reuses the System One types and parser in `posthog/llm/system_one.py` and the explicit-connection client in `posthog/llm/system_one_client.py`.
 Requests use the rate limiter and telemetry in `posthog/egress/typesafe`.
 The selected connection supplies its own endpoint and credential; it never falls back to instance gateway settings.
-Numeric and categorical support is separate from this integration.
+Categorical evaluations use a native Choice question for single selection, with option keys mapped to their labels.
+Multiple selection uses one Noul question per option and includes each category with probability at least 0.5.
+The endpoint must support the configured number of options and questions; model limits can be lower than the evaluation's configuration limit.
+Results use the existing categorical event property and passing rules.
+An empty selection is an applicable result; N/A remains a separate outcome.
+`$ai_evaluation_probability` remains the probability of true for boolean evaluations and is not emitted for categorical results.
 Numeric evaluations retain their existing arbitrary ranges and completion-based judges.
 API compatibility does not guarantee equivalent judgments or calibration across models.
 Compare results on representative inputs when changing models.

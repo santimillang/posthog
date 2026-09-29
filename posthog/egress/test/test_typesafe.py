@@ -1,6 +1,7 @@
 import json
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from threading import Thread
@@ -10,15 +11,24 @@ from unittest.mock import AsyncMock, patch
 
 from django.test import SimpleTestCase, override_settings
 
-import requests
 from parameterized import parameterized
 from prometheus_client import REGISTRY
 
 from posthog.egress.limiter.policies import Priority, resolve_policy
 from posthog.egress.observability.observability import scope_fingerprint
-from posthog.egress.typesafe.client import MAX_RESPONSE_BYTES, TypeSafeNotConfigured, TypeSafeRequestFailed, system_one
+from posthog.egress.typesafe.client import MAX_RESPONSE_BYTES
 from posthog.egress.typesafe.limiter import typesafe_account_key
-from posthog.llm.system_one import ChoiceAnswer, ChoiceQuestion, NoulAnswer, NoulQuestion, Question
+from posthog.egress.typesafe.transport import TypeSafeEgressBudgetExhausted
+from posthog.llm.system_one import (
+    ChoiceAnswer,
+    ChoiceQuestion,
+    NoulAnswer,
+    NoulQuestion,
+    Question,
+    SystemOneConnectionError,
+    SystemOneRequestFailed,
+)
+from posthog.llm.system_one_client import SystemOneClient, TypeSafeFallback, build_system_one_client
 
 _FAKE_API_KEY = "fake-key-for-tests"
 
@@ -84,8 +94,16 @@ def _with_answer(question_id: str, answer: dict[str, Any]) -> str:
 
 @override_settings(TYPESAFE_API_KEY=_FAKE_API_KEY)
 class TestTypeSafeEgress(SimpleTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        with override_settings(AI_GATEWAY_URL="", AI_GATEWAY_API_KEY=""):
+            self.system_one: SystemOneClient = build_system_one_client(
+                model="unused", ai_product="test", typesafe_fallback=TypeSafeFallback(model="jev-latest", source="test")
+            )
+
     @parameterized.expand(
         [
+            ("default_instance_key", None, "https://api.typesafe.ai/v1"),
             ("explicit_instance_key", _FAKE_API_KEY, "https://api.typesafe.ai/v1"),
             ("customer_key", "fake-customer-key", "https://api.typesafe.ai/v1"),
             ("custom_endpoint", "fake-customer-key", "https://decisions.example.com/v1"),
@@ -111,12 +129,14 @@ class TestTypeSafeEgress(SimpleTestCase):
                 return_value=_response(200, json.dumps(_ANSWERS)),
             ) as request,
         ):
-            result = system_one(
+            client = (
+                self.system_one
+                if api_key is None
+                else replace(self.system_one, api_key=api_key, url=f"{base_url}/systemone", scope=scope)
+            )
+            result = client.decide(
                 state={"ticket": "Payouts fail"},
                 questions=_QUESTIONS,
-                source="test",
-                api_key=api_key,
-                base_url=base_url,
             )
 
         assert request.call_args.args == ("POST", f"{base_url}/systemone")
@@ -150,19 +170,6 @@ class TestTypeSafeEgress(SimpleTestCase):
         assert _FAKE_API_KEY not in metrics
         assert "fake-customer-key" not in metrics
         assert "decisions.example.com" not in metrics
-
-    def test_default_typesafe_key_keeps_the_existing_requests_transport(self) -> None:
-        response = requests.Response()
-        response.status_code = 200
-        response._content = json.dumps(_ANSWERS).encode()
-        with (
-            patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True),
-            patch("requests.request", return_value=response) as request,
-        ):
-            result = system_one(state="hello", questions=_QUESTIONS, source="test")
-
-        assert result.model == "jev-1.13.0"
-        assert request.call_args.args == ("POST", "https://api.typesafe.ai/v1/systemone")
 
     @parameterized.expand(
         [
@@ -206,11 +213,11 @@ class TestTypeSafeEgress(SimpleTestCase):
         self, _name: str, status: int, body: str, expected_status_code: int | None
     ) -> None:
         with (
-            patch("posthog.egress.typesafe.transport.consume_typesafe_sync", return_value=True),
+            patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True),
             patch("aiohttp.ClientSession.request", new_callable=AsyncMock, return_value=_response(status, body)),
-            self.assertRaises(TypeSafeRequestFailed) as raised,
+            self.assertRaises(SystemOneRequestFailed) as raised,
         ):
-            system_one(state="Payouts fail", questions=_QUESTIONS, source="test", api_key="fake-customer-key")
+            self.system_one.decide(state="Payouts fail", questions=_QUESTIONS)
         assert raised.exception.status_code == expected_status_code
 
     @parameterized.expand(
@@ -224,11 +231,11 @@ class TestTypeSafeEgress(SimpleTestCase):
         response = _response(200, body)
         response.headers.update(headers)
         with (
-            patch("posthog.egress.typesafe.transport.consume_typesafe_sync", return_value=True),
+            patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True),
             patch("aiohttp.ClientSession.request", new_callable=AsyncMock, return_value=response),
-            self.assertRaisesRegex(TypeSafeRequestFailed, "exceeded its limits"),
+            self.assertRaisesRegex(SystemOneRequestFailed, "exceeded its limits"),
         ):
-            system_one(state="hello", questions=_QUESTIONS, source="test", api_key="fake-customer-key")
+            self.system_one.decide(state="hello", questions=_QUESTIONS)
 
     @parameterized.expand(["headers", "body"])
     def test_slow_response_cannot_extend_the_total_time_limit(self, slow_part: str) -> None:
@@ -253,17 +260,15 @@ class TestTypeSafeEgress(SimpleTestCase):
         try:
             started_at = time.monotonic()
             with (
-                patch("posthog.egress.typesafe.transport.consume_typesafe_sync", return_value=True),
-                self.assertRaises(requests.RequestException),
+                patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True),
+                self.assertRaises(SystemOneConnectionError),
             ):
-                system_one(
-                    state="hello",
-                    questions=_QUESTIONS,
-                    source="test",
-                    base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                replace(
+                    self.system_one,
+                    url=f"http://127.0.0.1:{server.server_port}/v1/systemone",
                     api_key="",
                     timeout=0.25,
-                )
+                ).decide(state="hello", questions=_QUESTIONS)
             assert time.monotonic() - started_at < 0.8
         finally:
             server.shutdown()
@@ -273,17 +278,11 @@ class TestTypeSafeEgress(SimpleTestCase):
         response = _response(302, "redirect body")
         response.headers["Location"] = "https://elsewhere.example.com/systemone"
         with (
-            patch("posthog.egress.typesafe.transport.consume_typesafe_sync", return_value=True),
+            patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True),
             patch("aiohttp.ClientSession.request", new_callable=AsyncMock, return_value=response) as request,
-            self.assertRaises(TypeSafeRequestFailed) as raised,
+            self.assertRaises(SystemOneRequestFailed) as raised,
         ):
-            system_one(
-                state="hello",
-                questions=_QUESTIONS,
-                source="test",
-                api_key="fake-customer-key",
-                base_url="https://decisions.example.com/v1",
-            )
+            self.system_one.decide(state="hello", questions=_QUESTIONS)
         assert raised.exception.status_code == 302
         assert request.call_args.kwargs["allow_redirects"] is False
         assert response.content.read_count == 0
@@ -307,15 +306,13 @@ class TestTypeSafeEgress(SimpleTestCase):
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            with patch("posthog.egress.typesafe.transport.consume_typesafe_sync", return_value=True):
-                result = system_one(
-                    state="hello",
-                    questions=_QUESTIONS,
-                    source="test",
-                    base_url=f"http://decisions.example.com:{server.server_port}/v1",
+            with patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=True):
+                result = replace(
+                    self.system_one,
+                    url=f"http://decisions.example.com:{server.server_port}/v1/systemone",
                     api_key="",
                     pinned_ip=ip_address("127.0.0.1"),
-                )
+                ).decide(state="hello", questions=_QUESTIONS)
             assert result.model == "jev-1.13.0"
             assert hosts == [f"decisions.example.com:{server.server_port}"]
         finally:
@@ -324,32 +321,17 @@ class TestTypeSafeEgress(SimpleTestCase):
 
     @parameterized.expand(
         [
-            ("no_configured_key", "", "https://api.typesafe.ai/v1", Priority.NORMAL, TypeSafeNotConfigured),
-            (
-                "critical_lane_skips_the_spend_ceiling",
-                _FAKE_API_KEY,
-                "https://api.typesafe.ai/v1",
-                Priority.CRITICAL,
-                ValueError,
-            ),
-            (
-                "custom_endpoint_cannot_inherit_instance_key",
-                _FAKE_API_KEY,
-                "https://decisions.example.com/v1",
-                Priority.NORMAL,
-                ValueError,
-            ),
+            ("budget_exhausted", Priority.NORMAL, False, TypeSafeEgressBudgetExhausted),
+            ("critical_skips_the_spend_ceiling", Priority.CRITICAL, True, ValueError),
         ]
     )
-    def test_never_calls_out(
-        self, _name: str, api_key: str, base_url: str, priority: Priority, error: type[Exception]
-    ) -> None:
+    def test_never_calls_out(self, _name: str, priority: Priority, granted: bool, error: type[Exception]) -> None:
         with (
-            override_settings(TYPESAFE_API_KEY=api_key),
+            patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=granted),
             patch("aiohttp.ClientSession.request", new_callable=AsyncMock) as request,
             self.assertRaises(error),
         ):
-            system_one(state="hi", questions=_QUESTIONS, source="test", priority=priority, base_url=base_url)
+            replace(self.system_one, priority=priority).decide(state="hi", questions=_QUESTIONS)
         request.assert_not_called()
 
     @override_settings(TYPESAFE_EGRESS_PER_MINUTE_BUDGET=7, TYPESAFE_EGRESS_HOURLY_BUDGET=11)

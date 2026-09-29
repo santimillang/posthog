@@ -37,9 +37,22 @@ class SystemOneRequestFailed(Exception):
     does not match the documented shape). ``status_code`` is set for an HTTP error, so a caller can
     defer a 429 or 529 and drop the rest."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after: str | None = None,
+        response_text: str = "",
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after = retry_after
+        self.response_text = response_text
+
+
+class SystemOneConnectionError(SystemOneRequestFailed):
+    """The server could not be reached or the request did not finish within its deadline."""
 
 
 @frozen

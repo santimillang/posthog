@@ -9,30 +9,28 @@ its own, and the result says which model answered.
 
 from collections.abc import Mapping
 from dataclasses import field
+from ipaddress import IPv4Address, IPv6Address
 from urllib.parse import urlparse, urlunparse
 
 from django.conf import settings
 
-import httpx
 import structlog
+from asgiref.sync import async_to_sync
 
 from posthog.dataclasses import frozen
 from posthog.egress.limiter.policies import Priority
-from posthog.egress.typesafe.client import TYPESAFE_API_BASE, system_one
+from posthog.egress.typesafe.client import TYPESAFE_API_BASE, request_system_one
+from posthog.egress.typesafe.limiter import ACCOUNT_SCOPE_ID
 from posthog.llm.gateway_client import AIGatewayConfig, ai_gateway_headers, resolve_ai_gateway_config
 from posthog.llm.system_one import (
+    MAX_CHOICE_OPTIONS,
     SYSTEM_ONE_PATH,
     ChoiceQuestion,
     JsonValue,
     Question,
     SystemOneNotConfigured,
-    SystemOneRequestFailed,
     SystemOneResult,
-    build_system_one_body,
-    parse_system_one_response,
 )
-from posthog.security.pinned_requests import SSRFBlockedError, select_pinned_ip
-from posthog.security.url_validation import validate_url_and_pin_ips
 
 logger = structlog.get_logger(__name__)
 
@@ -53,58 +51,38 @@ class TypeSafeFallback:
 
 
 @frozen
-class GatewaySystemOneClient:
+class SystemOneClient:
+    """One transport for configured servers and validated customer endpoints.
+
+    Customer URLs must be validated before construction, with their DNS pin passed as pinned_ip.
+    An empty api_key means no authentication; it never changes the transport.
+    """
+
     url: str
     api_key: str = field(repr=False)
-    headers: Mapping[str, str]
-    model: str
-    timeout: float
-
-    def decide(self, *, state: JsonValue, questions: Mapping[str, Question]) -> SystemOneResult:
-        if not 1 <= len(questions) <= GATEWAY_MAX_QUESTIONS:
-            raise ValueError(f"A System One request needs between 1 and {GATEWAY_MAX_QUESTIONS} questions")
-        for question_id, question in questions.items():
-            if isinstance(question, ChoiceQuestion) and len(question.criteria) > GATEWAY_MAX_CHOICE_OPTIONS:
-                raise ValueError(f"{question_id!r} has more than {GATEWAY_MAX_CHOICE_OPTIONS} options")
-        try:
-            with httpx.Client(trust_env=False, timeout=self.timeout) as client:
-                response = client.post(
-                    self.url,
-                    json=build_system_one_body(state=state, questions=questions, model=self.model),
-                    headers={**self.headers, "Authorization": f"Bearer {self.api_key}"},
-                )
-        except httpx.HTTPError as exc:
-            raise SystemOneRequestFailed(f"The ai-gateway was not reached: {exc.__class__.__name__}") from exc
-        if response.status_code != 200:
-            # The error body can echo the state, so it stays out of the exception that gets logged.
-            raise SystemOneRequestFailed(
-                f"The ai-gateway returned HTTP {response.status_code}", status_code=response.status_code
-            )
-        try:
-            payload: object = response.json()
-        except ValueError as exc:
-            raise SystemOneRequestFailed("The ai-gateway returned a non-JSON body") from exc
-        return parse_system_one_response(payload, questions)
-
-
-@frozen
-class TypeSafeSystemOneClient:
     model: str
     source: str
-    priority: Priority
     timeout: float
-
-    api_key: str | None = field(default=None, repr=False)
-    base_url: str = f"{TYPESAFE_API_BASE}/v1"
+    scope: str | None = None
+    headers: Mapping[str, str] = field(default_factory=dict)
+    priority: Priority = Priority.NORMAL
+    pinned_ip: IPv4Address | IPv6Address | None = None
+    max_questions: int | None = None
+    max_choice_options: int = MAX_CHOICE_OPTIONS
 
     def decide(self, *, state: JsonValue, questions: Mapping[str, Question]) -> SystemOneResult:
-        pinned_ip = None
-        if self.api_key is not None:
-            verdict = validate_url_and_pin_ips(f"{self.base_url.rstrip('/')}/systemone")
-            if not verdict.allowed:
-                raise SSRFBlockedError(verdict.reason or "URL blocked by SSRF protection")
-            pinned_ip = select_pinned_ip(verdict.pinned_ips)
-        return system_one(
+        return async_to_sync(self.adecide)(state=state, questions=questions)
+
+    async def adecide(self, *, state: JsonValue, questions: Mapping[str, Question]) -> SystemOneResult:
+        if not questions:
+            raise ValueError("A System One request needs at least one question")
+        if self.max_questions is not None and len(questions) > self.max_questions:
+            raise ValueError(f"A System One request accepts at most {self.max_questions} questions")
+        for question_id, question in questions.items():
+            if isinstance(question, ChoiceQuestion) and len(question.criteria) > self.max_choice_options:
+                raise ValueError(f"{question_id!r} has more than {self.max_choice_options} options")
+        return await request_system_one(
+            url=self.url,
             state=state,
             questions=questions,
             source=self.source,
@@ -112,12 +90,10 @@ class TypeSafeSystemOneClient:
             priority=self.priority,
             timeout=self.timeout,
             api_key=self.api_key,
-            base_url=self.base_url,
-            pinned_ip=pinned_ip,
+            scope=self.scope,
+            headers=self.headers,
+            pinned_ip=self.pinned_ip,
         )
-
-
-type SystemOneClient = GatewaySystemOneClient | TypeSafeSystemOneClient
 
 
 def _system_one_url(gateway_url: str) -> str:
@@ -163,7 +139,7 @@ def build_system_one_client(
     """
     gateway = _usable_gateway()
     if gateway is not None:
-        return GatewaySystemOneClient(
+        return SystemOneClient(
             url=_system_one_url(gateway.url),
             api_key=gateway.api_key,
             headers=ai_gateway_headers(
@@ -171,13 +147,19 @@ def build_system_one_client(
             )
             or {},
             model=model,
+            source=ai_product,
             timeout=timeout,
+            max_questions=GATEWAY_MAX_QUESTIONS,
+            max_choice_options=GATEWAY_MAX_CHOICE_OPTIONS,
         )
     if typesafe_fallback is None:
         raise SystemOneNotConfigured("Configure AI_GATEWAY_URL (https) and AI_GATEWAY_API_KEY")
     if not settings.TYPESAFE_API_KEY:
         raise SystemOneNotConfigured("Configure AI_GATEWAY_URL and AI_GATEWAY_API_KEY, or TYPESAFE_API_KEY")
-    return TypeSafeSystemOneClient(
+    return SystemOneClient(
+        url=f"{TYPESAFE_API_BASE}{SYSTEM_ONE_PATH}",
+        api_key=settings.TYPESAFE_API_KEY,
+        scope=ACCOUNT_SCOPE_ID,
         model=typesafe_fallback.model,
         source=typesafe_fallback.source,
         priority=typesafe_fallback.priority,

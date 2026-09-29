@@ -1,10 +1,11 @@
-import json
+import asyncio
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from django.test import SimpleTestCase, override_settings
 
-import httpx
+import aiohttp
+from aioresponses import aioresponses
 from parameterized import parameterized
 
 from posthog.egress.limiter.policies import Priority
@@ -17,13 +18,7 @@ from posthog.llm.system_one import (
     SystemOneNotConfigured,
     SystemOneRequestFailed,
 )
-from posthog.llm.system_one_client import (
-    GatewaySystemOneClient,
-    SystemOneClient,
-    TypeSafeFallback,
-    TypeSafeSystemOneClient,
-    build_system_one_client,
-)
+from posthog.llm.system_one_client import SystemOneClient, TypeSafeFallback, build_system_one_client
 
 GATEWAY_MODEL = "posthog/hogference/jevk5-fp8-0.2"
 FALLBACK = TypeSafeFallback(model="jev-1.13.0", source="test", priority=Priority.BATCH)
@@ -58,8 +53,18 @@ def _build(typesafe_fallback: TypeSafeFallback | None = FALLBACK) -> SystemOneCl
 class TestBuildSystemOneClient(SimpleTestCase):
     @parameterized.expand(
         [
-            ("gateway_wins", {**GATEWAY, "TYPESAFE_API_KEY": "ts-key"}, GatewaySystemOneClient, GATEWAY_MODEL),
-            ("typesafe_fallback", {"TYPESAFE_API_KEY": "ts-key"}, TypeSafeSystemOneClient, FALLBACK.model),
+            (
+                "gateway_wins",
+                {**GATEWAY, "TYPESAFE_API_KEY": "ts-key"},
+                "https://ai-gateway.example.com/v1/systemone",
+                GATEWAY_MODEL,
+            ),
+            (
+                "typesafe_fallback",
+                {"TYPESAFE_API_KEY": "ts-key"},
+                "https://api.typesafe.ai/v1/systemone",
+                FALLBACK.model,
+            ),
             (
                 "gateway_over_plain_http_falls_back",
                 {
@@ -67,18 +72,16 @@ class TestBuildSystemOneClient(SimpleTestCase):
                     "AI_GATEWAY_API_KEY": "phs_test",
                     "TYPESAFE_API_KEY": "ts-key",
                 },
-                TypeSafeSystemOneClient,
+                "https://api.typesafe.ai/v1/systemone",
                 FALLBACK.model,
             ),
         ]
     )
-    def test_picks_the_server_and_its_model(
-        self, _name: str, configured: dict, kind: type[SystemOneClient], model: str
-    ) -> None:
+    def test_picks_the_server_and_its_model(self, _name: str, configured: dict, url: str, model: str) -> None:
         with override_settings(**{**NOTHING, **configured}):
             client = _build()
 
-        assert isinstance(client, kind)
+        assert client.url == url
         assert client.model == model
 
     @parameterized.expand(
@@ -102,15 +105,19 @@ class TestBuildSystemOneClient(SimpleTestCase):
     def test_gateway_request_reaches_the_system_one_route_with_its_labels(self) -> None:
         with override_settings(**{**NOTHING, **GATEWAY}):
             client = _build()
-        with patch.object(httpx.Client, "send", return_value=httpx.Response(200, json=ANSWERS)) as send:
+        with (
+            aioresponses() as requests,
+            patch("posthog.egress.limiter.backends.LimitsBackend.consume_sync", return_value=False) as budget,
+        ):
+            requests.post("https://ai-gateway.example.com/v1/systemone", payload=ANSWERS)
             result = client.decide(state={"ticket": "Payouts fail"}, questions=QUESTIONS)
 
-        request: httpx.Request = send.call_args.args[0]
-        assert str(request.url) == "https://ai-gateway.example.com/v1/systemone"
-        assert request.headers["Authorization"] == "Bearer phs_test"
-        assert request.headers["X-PostHog-Product"] == "test_product"
-        assert request.headers["X-PostHog-Distinct-Id"] == "team-7"
-        assert json.loads(request.content)["model"] == GATEWAY_MODEL
+        budget.assert_not_called()
+        request = next(iter(requests.requests.values()))[0].kwargs
+        assert request["headers"]["Authorization"] == "Bearer phs_test"
+        assert request["headers"]["X-PostHog-Product"] == "test_product"
+        assert request["headers"]["X-PostHog-Distinct-Id"] == "team-7"
+        assert request["json"]["model"] == GATEWAY_MODEL
         assert result.model == GATEWAY_MODEL
         assert result.answers == {
             "urgent": NoulAnswer(probability=0.8),
@@ -119,16 +126,17 @@ class TestBuildSystemOneClient(SimpleTestCase):
 
     @parameterized.expand(
         [
-            ("http_error", httpx.Response(404, json={"error": "not found"}), 404),
-            ("unparseable_answer", httpx.Response(200, json={"model": GATEWAY_MODEL, "answers": {}}), None),
-            ("unreachable", httpx.ConnectError("refused"), None),
+            ("http_error", {"status": 404}, 404),
+            ("unparseable_answer", {"payload": {"model": GATEWAY_MODEL, "answers": {}}}, None),
+            ("unreachable", {"exception": aiohttp.ClientConnectionError("refused")}, None),
+            ("timeout", {"exception": TimeoutError()}, None),
         ]
     )
     def test_gateway_failures_raise_request_failed(self, _name: str, outcome, status_code: int | None) -> None:
         with override_settings(**{**NOTHING, **GATEWAY}):
             client = _build()
-        mock = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
-        with patch.object(httpx.Client, "send", **mock), self.assertRaises(SystemOneRequestFailed) as raised:
+        with aioresponses() as requests, self.assertRaises(SystemOneRequestFailed) as raised:
+            requests.post("https://ai-gateway.example.com/v1/systemone", **outcome)
             client.decide(state="Payouts fail", questions=QUESTIONS)
 
         assert raised.exception.status_code == status_code
@@ -155,7 +163,7 @@ class TestBuildSystemOneClient(SimpleTestCase):
         with override_settings(**{**NOTHING, **GATEWAY}):
             client = _build()
 
-        with patch.object(httpx.Client, "send") as send, self.assertRaises(ValueError):
+        with patch("aiohttp.ClientSession.request", new_callable=AsyncMock) as send, self.assertRaises(ValueError):
             client.decide(state="x", questions=questions)
 
         send.assert_not_called()
@@ -163,8 +171,32 @@ class TestBuildSystemOneClient(SimpleTestCase):
     def test_typesafe_fallback_sends_its_model_and_lane(self) -> None:
         with override_settings(**{**NOTHING, "TYPESAFE_API_KEY": "ts-key"}):
             client = _build()
-        with patch("posthog.llm.system_one_client.system_one") as system_one:
+        with patch("posthog.llm.system_one_client.request_system_one", new_callable=AsyncMock) as system_one:
             client.decide(state="x", questions=QUESTIONS)
 
         kwargs = system_one.call_args.kwargs
         assert (kwargs["source"], kwargs["model"], kwargs["priority"]) == ("test", FALLBACK.model, Priority.BATCH)
+        assert kwargs["scope"] == "default"
+        assert kwargs["api_key"] == "ts-key"
+
+    async def test_async_caller_uses_the_same_response_parser(self) -> None:
+        with override_settings(**{**NOTHING, **GATEWAY}):
+            client = _build()
+        with aioresponses() as requests:
+            requests.post("https://ai-gateway.example.com/v1/systemone", payload=ANSWERS)
+            result = await client.adecide(state="hello", questions=QUESTIONS)
+        assert result.answers["urgent"] == NoulAnswer(probability=0.8)
+
+    async def test_cancellation_closes_the_session_and_propagates(self) -> None:
+        sessions: list[aiohttp.ClientSession] = []
+
+        async def cancel(session: aiohttp.ClientSession, *args: object, **kwargs: object) -> None:
+            sessions.append(session)
+            raise asyncio.CancelledError
+
+        with override_settings(**{**NOTHING, **GATEWAY}):
+            client = _build()
+        with patch("aiohttp.ClientSession.request", cancel), self.assertRaises(asyncio.CancelledError):
+            await client.adecide(state="hello", questions=QUESTIONS)
+        assert len(sessions) == 1
+        assert sessions[0].closed

@@ -6,17 +6,22 @@ from urllib.parse import urlsplit
 
 from django.conf import settings
 
-import requests
-
 from posthog.egress.limiter.policies import Priority
-from posthog.egress.typesafe.client import TypeSafeRequestFailed
+from posthog.egress.observability.observability import scope_fingerprint
 from posthog.egress.typesafe.transport import TypeSafeEgressBudgetExhausted
-from posthog.llm.system_one import JsonValue, NoulQuestion, Question, SystemOneResult
-from posthog.llm.system_one_client import TypeSafeSystemOneClient
+from posthog.llm.system_one import (
+    JsonValue,
+    NoulQuestion,
+    Question,
+    SystemOneConnectionError,
+    SystemOneRequestFailed,
+    SystemOneResult,
+)
+from posthog.llm.system_one_client import SystemOneClient as SharedSystemOneClient
 from posthog.models import Team
 from posthog.ph_client import get_feature_flag_or_none
-from posthog.security.pinned_requests import SSRFBlockedError
-from posthog.security.url_validation import has_authority_bypass_chars
+from posthog.security.pinned_requests import SSRFBlockedError, select_pinned_ip
+from posthog.security.url_validation import has_authority_bypass_chars, validate_url_and_pin_ips
 
 from products.ai_observability.backend.llm.errors import (
     AuthenticationError,
@@ -118,9 +123,15 @@ class SystemOneClient:
         except ValueError as error:
             raise SystemOneEndpointBlockedError(str(error)) from error
         try:
-            return TypeSafeSystemOneClient(
+            url = f"{base_url}/systemone"
+            verdict = validate_url_and_pin_ips(url)
+            if not verdict.allowed:
+                raise SSRFBlockedError(verdict.reason or "URL blocked by SSRF protection")
+            return SharedSystemOneClient(
                 api_key=api_key,
-                base_url=base_url,
+                url=url,
+                pinned_ip=select_pinned_ip(verdict.pinned_ips),
+                scope=scope_fingerprint(base_url, api_key),
                 model=model,
                 source="llma_evaluations",
                 priority=priority,
@@ -130,11 +141,10 @@ class SystemOneClient:
             raise SystemOneRateLimitError(None) from error
         except SSRFBlockedError as error:
             raise SystemOneEndpointBlockedError("This endpoint is not allowed. Use a public HTTPS endpoint.") from error
-        except requests.RequestException as error:
+        except SystemOneConnectionError as error:
             raise ProviderConnectionError("Could not reach the System One endpoint. Try again.") from error
-        except TypeSafeRequestFailed as error:
+        except SystemOneRequestFailed as error:
             status = error.status_code
-            response = error.response
             if status is None:
                 raise StructuredOutputParseError(
                     "The endpoint returned an invalid System One response. Check compatibility."
@@ -146,9 +156,7 @@ class SystemOneClient:
             if status == 404:
                 raise ModelNotFoundError(model) from error
             if status in (408, 429, 503, 529):
-                raise SystemOneRateLimitError(
-                    response.headers.get("Retry-After") if response is not None else None
-                ) from error
+                raise SystemOneRateLimitError(error.retry_after) from error
             if status >= 500:
                 raise ProviderConnectionError(
                     "The System One endpoint is temporarily unavailable. Try again."
@@ -157,9 +165,7 @@ class SystemOneClient:
                 raise SystemOneEndpointBlockedError(
                     "The endpoint redirected the request. Use its final HTTPS URL."
                 ) from error
-            if status == 413 or (
-                status == 422 and response is not None and is_context_window_error_message(response.text)
-            ):
+            if status == 413 or (status == 422 and is_context_window_error_message(error.response_text)):
                 raise ContextWindowExceededError(
                     "This input exceeds the endpoint's size limit. Reduce the input."
                 ) from error

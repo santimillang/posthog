@@ -1,99 +1,41 @@
-"""TypeSafe incarnation of the egress transport.
+"""Gated, recorded transport for System One requests.
 
-``typesafe_request`` is the one way to call TypeSafe from anywhere in the codebase: it gates on the
-selected account budget and records telemetry by construction. It stays token-agnostic
-like the other incarnations, so the caller owns where the API key comes from:
-:mod:`posthog.egress.typesafe.client` reads it from settings.
+The TypeSafe metric names and budget namespace stay stable for existing dashboards.
+Gateway calls use scope=None: their budget belongs to the gateway, not the TypeSafe account.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import requests
+from posthog.egress.limiter.outbound import get_outbound_rate_limiter
+from posthog.egress.limiter.policies import Priority
+from posthog.egress.transport.transport import AsyncEgressClient, EgressBudgetExhausted
+from posthog.egress.typesafe.limiter import ACCOUNT_SCOPE_ID, typesafe_account_key
+from posthog.egress.typesafe.observability import typesafe_egress
 
 if TYPE_CHECKING:
     import aiohttp
 
-from posthog.egress.limiter.policies import Priority
-from posthog.egress.transport.transport import AsyncEgressClient, EgressBudgetExhausted, EgressClient
-from posthog.egress.typesafe.limiter import ACCOUNT_SCOPE_ID, consume_typesafe_sync
-from posthog.egress.typesafe.observability import typesafe_egress
-
 
 class TypeSafeEgressBudgetExhausted(EgressBudgetExhausted):
-    """A sheddable (BATCH/NORMAL) TypeSafe call was shed by our egress limiter before it was sent.
-    Callers degrade by skipping the judgment or deferring it to a later run."""
+    """A sheddable System One call exhausted its egress budget before it was sent."""
 
 
-class TypeSafeClient(EgressClient):
-    """The TypeSafe incarnation of :class:`EgressClient`. Stateless, so one shared instance serves
-    every caller; wire it through :func:`typesafe_request`."""
-
-    observability = typesafe_egress
-
-    def _standard_headers(self) -> dict[str, str]:
-        return {"Accept": "application/json", "Content-Type": "application/json"}
-
-    def _consume(self, scope: str, priority: Priority, source: str, url: str) -> bool:
-        return consume_typesafe_sync(scope=scope, priority=priority, source=source)
-
-    def _budget_exhausted_error(self, scope: str) -> TypeSafeEgressBudgetExhausted:
-        return TypeSafeEgressBudgetExhausted("TypeSafe egress budget exhausted; degrading", scope=scope)
-
-
-class AsyncTypeSafeClient(AsyncEgressClient):
+class TypeSafeClient(AsyncEgressClient):
     observability = typesafe_egress
 
     def _standard_headers(self) -> dict[str, str]:
         return {"Accept": "application/json", "Accept-Encoding": "identity", "Content-Type": "application/json"}
 
     async def _consume(self, scope: str, priority: Priority, source: str, url: str) -> bool:
-        return consume_typesafe_sync(scope=scope, priority=priority, source=source)
+        return await get_outbound_rate_limiter().acquire(typesafe_account_key(scope), priority=priority, source=source)
 
     def _budget_exhausted_error(self, scope: str) -> TypeSafeEgressBudgetExhausted:
         return TypeSafeEgressBudgetExhausted("TypeSafe egress budget exhausted; degrading", scope=scope)
 
 
 _typesafe_client = TypeSafeClient()
-_async_typesafe_client = AsyncTypeSafeClient()
-
-# A connection that will not open is never worth waiting on. A caller where a person waits for the
-# answer passes a shorter read timeout.
-DEFAULT_TIMEOUT: tuple[float, float] = (3.0, 15.0)
-
-
-def typesafe_request(
-    method: str,
-    url: str,
-    *,
-    api_key: str,
-    source: str,
-    endpoint: str,
-    scope: str = ACCOUNT_SCOPE_ID,
-    priority: Priority = Priority.NORMAL,
-    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    **kwargs: Any,
-) -> requests.Response:
-    """Make a gated, recorded TypeSafe request. ``source`` attributes the call to a subsystem.
-
-    Every call is sheddable: the state sent to TypeSafe is derived from user input, and every caller
-    can do without the judgment. A CRITICAL call is never shed, so it would skip the hourly ceiling,
-    which is the only cap on per-token spend. This function rejects CRITICAL for that reason.
-    """
-    if priority is Priority.CRITICAL:
-        raise ValueError("TypeSafe calls must be sheddable, so use NORMAL or BATCH")
-    return _typesafe_client.request(
-        method,
-        url,
-        source=source,
-        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-        scope=scope,
-        priority=priority,
-        endpoint=endpoint,
-        timeout=timeout,
-        **kwargs,
-    )
 
 
 async def typesafe_request_async(
@@ -104,18 +46,20 @@ async def typesafe_request_async(
     api_key: str,
     source: str,
     endpoint: str,
-    scope: str = ACCOUNT_SCOPE_ID,
+    scope: str | None = ACCOUNT_SCOPE_ID,
     priority: Priority = Priority.NORMAL,
+    headers: dict[str, str] | None = None,
     **kwargs: Any,
 ) -> aiohttp.ClientResponse:
-    if priority is Priority.CRITICAL:
+    # CRITICAL skips the spend ceiling, so every request with a local budget must be sheddable.
+    if scope and priority is Priority.CRITICAL:
         raise ValueError("TypeSafe calls must be sheddable, so use NORMAL or BATCH")
-    return await _async_typesafe_client.request(
+    return await _typesafe_client.request(
         session,
         method,
         url,
         source=source,
-        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+        headers={**(headers or {}), **({"Authorization": f"Bearer {api_key}"} if api_key else {})},
         scope=scope,
         priority=priority,
         endpoint=endpoint,

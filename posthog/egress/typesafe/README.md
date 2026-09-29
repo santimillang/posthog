@@ -18,12 +18,11 @@ Every caller meets these rules before it merges, and a reviewer blocks a caller 
 - **A launch that sends customer data needs an explicit opt-in.** Each customer turns it on before any of their data goes to TypeSafe. Use the approved opt-in copy. Until that copy exists, no caller sends customer data.
 - **A launch that sends customer data needs sign-off from leadership** before it ships, in addition to the opt-in.
 
-A self-hosted instance without `TYPESAFE_API_KEY` makes no default-service requests unless a caller passes an explicit credential.
+A self-hosted instance without `TYPESAFE_API_KEY` cannot use the TypeSafe fallback.
 
 ## Identity
 
 Calls with the configured instance TypeSafe API key draw from one budget under `typesafe:account:default`.
-An explicit credential for the official endpoint uses that same budget when it matches the instance key.
 Other credentials and compatible endpoints use a fingerprint of the base URL and credential as their scope.
 The same connection shares a budget across workers and projects; different credentials or endpoints have separate budgets.
 No credential or custom URL reaches a metric label.
@@ -51,8 +50,8 @@ Compatible endpoints use these same settings as operator ceilings; their vendor 
 
 ## Lanes and callers
 
-The default reserve ladder applies, and `typesafe_request` defaults to `NORMAL`.
-`typesafe_request` rejects `CRITICAL`, because a `CRITICAL` call is never shed and would skip the hourly spend ceiling.
+The default reserve ladder applies, and `typesafe_request_async` defaults to `NORMAL`.
+Budgeted requests reject `CRITICAL`, because a `CRITICAL` call is never shed and would skip the hourly spend ceiling.
 Give every caller an explicit lane: `NORMAL` when a person waits for the answer, `BATCH` for background work.
 AI observability uses `llma_evaluations` as its source, `BATCH` for evaluation runs, and `NORMAL` for synthetic connection validation.
 The evaluation caller checks the project-group flag `llm-analytics-system-one-evaluations` before connection validation and every evaluation.
@@ -66,31 +65,35 @@ Keep the experimental flag limited to PostHog staff projects during rollout.
 TypeSafe documents no rate-limit status headers, so the domain declares no gauges.
 A 429 can carry `retry-after`, and a 529 means TypeSafe is overloaded.
 TypeSafe asks for exponential backoff on both, and the caller owns the retry.
-`TypeSafeRequestFailed.status_code` lets a caller defer a 429 or a 529 and drop the rest.
+`SystemOneRequestFailed.status_code` lets a caller defer a 429 or a 529 and drop the rest.
+`retry_after` preserves the server's retry hint; `response_text` retains a bounded 422 body for error classification without including it in exception messages.
 The counter is `typesafe_api_requests_total`, labeled `account, method, endpoint, status_code, source`.
 
 ## Auth
 
-`system_one` uses `TYPESAFE_API_KEY` when no credential is passed.
-An explicit `api_key` selects a caller-owned bearer token; an empty string selects no authentication for a compatible endpoint.
-The official endpoint always requires a key and raises `TypeSafeNotConfigured` without one.
-Customer connections use `TypeSafeSystemOneClient` with an explicit `api_key` and `base_url`.
-That client pins DNS for explicit credentials, including an empty token for a custom endpoint, and never selects the instance gateway.
-Customer endpoint requests ignore environment proxies so the connection always uses the validated address.
-Calls that omit an explicit credential keep the existing Requests transport and its proxy settings.
-AI observability additionally validates customer URLs as public HTTPS URLs.
-Customer endpoint redirects are rejected without reading their response bodies.
+`build_system_one_client` resolves the gateway credential, or `TYPESAFE_API_KEY` when a caller allows the TypeSafe fallback.
+It raises `SystemOneNotConfigured` if neither permitted service has a credential.
+Direct clients require an explicit `api_key`; an empty string selects no authentication for a compatible endpoint.
+All endpoints use `SystemOneClient` with an explicit URL and credential.
+AI observability validates customer URLs as public HTTPS URLs and supplies the validated DNS pin to the client.
+The server-configured gateway can use localhost for development; its configuration is trusted independently of its credential.
+All requests ignore environment proxies so a customer connection cannot bypass its validated address.
+Redirects are rejected without reading their response bodies.
 
 ## Typed client
 
-Callers use `client.py` rather than `typesafe_request`.
-`system_one(state=..., questions=..., source=..., model=...)` sends one state with a map of `NoulQuestion` and `ChoiceQuestion` entries.
+Callers use `SystemOneClient.decide` for synchronous code or `await SystemOneClient.adecide` for asynchronous code.
+Both use the same aiohttp request, response bounds, and parser.
+The gateway factory preserves its headers and model limits and supplies no local budget scope, since the gateway owns its budget.
+The TypeSafe egress metric names remain unchanged.
+`decide(state=..., questions=...)` sends one state with a map of `NoulQuestion` and `ChoiceQuestion` entries.
 It returns a `SystemOneResult` with one `NoulAnswer` or `ChoiceAnswer` per question id, the versioned model that answered, and available input and output token counts.
-It raises `TypeSafeRequestFailed` on an HTTP error, and on a body that lacks the answering model or a complete answer for any question.
-Customer endpoint requests use uncompressed responses and stream up to 1 MiB, including for a 422 error body.
-Their total timeout covers response headers and body, so a server cannot extend the request by sending a slow stream.
+It raises `SystemOneRequestFailed` on an HTTP error, and on a body that lacks the answering model or a complete answer for any question.
+`SystemOneConnectionError` distinguishes a connection failure or timeout from an invalid response.
+All requests use uncompressed responses and stream up to 1 MiB, including for a 422 error body.
+The total timeout covers response headers and body, so a server cannot extend the request by sending a slow stream.
 A choice outside the options the caller sent, or a choice without a probability for every option, counts as incomplete.
-`model` defaults to the `jev-latest` alias. A caller that tunes thresholds against one version pins that version's id, such as `jev-1.13.0`.
+Callers select their model explicitly. A caller that tunes thresholds against one version pins that version's id, such as `jev-1.13.0`.
 Only `POST /v1/systemone` is wired up, and score questions are not.
 
 ## Sources
