@@ -65,6 +65,7 @@ from products.alerts.backend.facade.platform_metrics import (
     increment_checks_skipped,
     increment_condition_failures,
     increment_deliveries_deferred,
+    increment_missed_evaluations,
     increment_notifications_muted,
     increment_state_transition,
     record_batch_duration,
@@ -146,6 +147,10 @@ class MetricsAlertSource(BaseModel):
     clauses: list[MetricsAlertClause] = Field(min_length=1, max_length=MAX_CLAUSES_PER_QUERY)
     formula: str | None = None
     value_clause: str | None = None
+    # Resolve only when this many prior windows are clear as well as the current one.
+    keep_firing_windows: int = Field(default=0, ge=0, le=10)
+    # What a window with no value means: keep state, read it as clear, or read it as a breach.
+    no_data_policy: Literal["inconclusive", "clear", "breach"] = "inconclusive"
 
     def evaluated_clause(self) -> str:
         return "formula" if self.formula is not None else (self.value_clause or self.clauses[0].name)
@@ -249,7 +254,11 @@ def _group_of(check: PlatformAlertCheckInput, grouping_key: str) -> PlatformAler
 
 
 def _snapshot(
-    check: PlatformAlertCheckInput, group: PlatformAlertGroupState, prior_breached: tuple[bool, ...]
+    check: PlatformAlertCheckInput,
+    group: PlatformAlertGroupState,
+    prior_breached: tuple[bool, ...],
+    *,
+    source: MetricsAlertSource | None = None,
 ) -> AlertSnapshot:
     return AlertSnapshot(
         state=AlertState(group.state),
@@ -260,6 +269,8 @@ def _snapshot(
         evaluation_periods=check.evaluation_periods,
         datapoints_to_alarm=check.datapoints_to_alarm,
         recent_events_breached=prior_breached,
+        keep_firing_windows=source.keep_firing_windows if source else 0,
+        no_data_policy=source.no_data_policy if source else "inconclusive",
     )
 
 
@@ -341,6 +352,8 @@ def _record_check_metrics(
         lag_ms = int((now - check.next_check_at).total_seconds() * 1000)
         if lag_ms > 0:
             safe_record(record_scheduler_lag, source, lag_ms)
+        if lag_ms > 2 * check.check_interval_minutes * 60 * 1000:
+            safe_record(increment_missed_evaluations, source)
 
 
 def _verdict(
@@ -351,8 +364,11 @@ def _verdict(
     *,
     now: datetime,
     skip: SkipReason | None,
+    source: MetricsAlertSource | None = None,
 ) -> AlertCheckOutcome:
-    outcome = evaluate_alert_check(_snapshot(check, group, prior_breached), check_input, now, policy=_POLICY)
+    outcome = evaluate_alert_check(
+        _snapshot(check, group, prior_breached, source=source), check_input, now, policy=_POLICY
+    )
     _record_check_metrics(
         check,
         group,
@@ -374,6 +390,7 @@ def _recorded(
     notified: bool,
     consecutive_failures: int,
     disable: bool = False,
+    incident: str = "none",
 ) -> PlatformAlertOutcome:
     return PlatformAlertOutcome(
         configuration_id=check.id,
@@ -382,6 +399,7 @@ def _recorded(
         consecutive_failures=consecutive_failures,
         disable=disable,
         grouping_key=grouping_key,
+        incident=incident,
     )
 
 
@@ -396,6 +414,7 @@ def _delivery(check: PlatformAlertCheckInput, decisions: Sequence[_GroupDecision
             notified=decision.outcome.update_last_notified_at,
             consecutive_failures=decision.outcome.consecutive_failures,
             disable=decision.outcome.disable,
+            incident=decision.outcome.incident.value,
         )
         for decision in decisions
     )
@@ -405,6 +424,7 @@ def _delivery(check: PlatformAlertCheckInput, decisions: Sequence[_GroupDecision
             notification=decision.outcome.notification.value,
             labels=decision.labels,
             value=decision.value,
+            incident=decision.outcome.incident.value,
         )
         for decision in decisions
         if decision.outcome.notification != NotificationAction.NONE
@@ -464,6 +484,7 @@ def _evaluate_group(
     budget: ConditionBudget,
     labels: dict[str, str],
     window_ends: tuple[str, ...],
+    source: MetricsAlertSource,
 ) -> AlertCheckOutcome:
     if check.condition_type == "hog" and check.condition_bytecode is not None:
         contexts = build_condition_contexts(
@@ -479,21 +500,27 @@ def _evaluate_group(
             return _condition_failed(check, group, verdict, now=now, muted=muted)
         decided, *earlier = verdict.flags
         return _verdict(
-            check, group, CheckInput(threshold_breached=decided, muted=muted), tuple(earlier), now=now, skip=None
+            check,
+            group,
+            CheckInput(threshold_breached=decided, muted=muted),
+            tuple(earlier),
+            now=now,
+            skip=None,
+            source=source,
         )
 
     flags = tuple(_breached(value, check.threshold_count, check.threshold_operator) for value in values)
     current, *prior = flags
     if current is None:
-        # No value for the current window is not a clear window: the group keeps its state and
-        # announces nothing.
+        # No value for the current window: the source's no-data policy decides what it means.
         return _verdict(
             check,
             group,
-            CheckInput(threshold_breached=False, is_inconclusive=True, muted=muted),
-            (),
+            CheckInput(threshold_breached=False, no_data=True, muted=muted),
+            tuple(bool(flag) for flag in prior),
             now=now,
             skip=None,
+            source=source,
         )
     return _verdict(
         check,
@@ -502,6 +529,7 @@ def _evaluate_group(
         tuple(bool(flag) for flag in prior),
         now=now,
         skip=None,
+        source=source,
     )
 
 
@@ -544,6 +572,7 @@ def _evaluate_groups(
             budget=budget,
             labels=dict(one.labels),
             window_ends=_window_ends_newest_first(one, check.evaluation_periods),
+            source=source,
         )
         decisions.append(_GroupDecision(group=group, labels=dict(one.labels), value=values[0], outcome=outcome))
     if len(selected) > MAX_GROUPS_PER_CONFIGURATION:
@@ -591,6 +620,7 @@ def _held(check: PlatformAlertCheckInput, outcome: ControlPlaneOutcome, *, skip:
         new_state=outcome.new_state.value,
         notified=False,
         consecutive_failures=outcome.consecutive_failures,
+        incident=outcome.incident.value,
     )
     _record_check_metrics(
         check,

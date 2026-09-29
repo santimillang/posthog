@@ -207,6 +207,8 @@ class PlatformAlertOutcome:
     # evaluation that cannot succeed.
     disable: bool = False
     grouping_key: str = ""
+    # "open", "close" or "none": what a paging destination does, independent of any announcement.
+    incident: str = "none"
 
 
 @frozen
@@ -218,6 +220,7 @@ class GroupTransition:
     notification: str
     labels: dict[str, str] = field(default_factory=dict)
     value: float | None = None
+    incident: str = "none"
 
 
 @frozen
