@@ -5442,7 +5442,7 @@ class TestHogFlowVersionedMetrics(ClickhouseTestMixin, APIBaseTest):
             f"/api/projects/{self.team.id}/hog_flows/{self.flow.id}/optimization", {"enabled": True}, format="json"
         )
 
-        # `hog_flow_proposal` is an internal scope object, so only a token that holds it can file.
+        # `hog_flow_proposal` is an internal scope object, so only a token carrying it can file.
         producer_key = generate_random_token_personal()
         PersonalAPIKey.objects.create(
             label="producer",
