@@ -55,8 +55,9 @@ class AccountRelationshipDefinition:
 
 @dataclass(frozen=True)
 class PinnedAccountProperty:
-    kind: Literal["custom_property", "relationship"]
-    id: UUID
+    kind: Literal["custom_property", "relationship", "account_field"]
+    # A definition UUID, or the field name for an account field.
+    id: UUID | str
 
 
 TASK_DIGEST_SEND_TIME_FORMAT = "%H:%M"

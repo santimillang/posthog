@@ -21,6 +21,7 @@ by the sibling ``organization_members`` module.
 import json
 from datetime import timedelta
 from typing import Any
+from uuid import UUID
 
 from django.utils import timezone
 
@@ -84,6 +85,7 @@ from products.customer_analytics.backend.facade.contracts import (
 from products.customer_analytics.backend.facade.enums import (
     AccountPropertyPinKind,
     AccountRelationshipSource,
+    PinnableAccountField,
     TaskDigestCadence,
 )
 
@@ -2101,12 +2103,26 @@ class PinnedAccountPropertySerializer(serializers.Serializer):
         choices=[
             (AccountPropertyPinKind.CUSTOM_PROPERTY.value, "Custom property"),
             (AccountPropertyPinKind.RELATIONSHIP.value, "Relationship"),
+            (AccountPropertyPinKind.ACCOUNT_FIELD.value, "Account field"),
         ],
-        help_text="Definition type for this pinned account property.",
+        help_text="Type of this pinned account property.",
     )
-    id = serializers.UUIDField(
-        help_text="Team-scoped custom property or relationship definition UUID.",
+    id = serializers.CharField(
+        help_text=(
+            "Team-scoped custom property or relationship definition UUID. "
+            "For an account field, the field name: "
+            + ", ".join(f"`{field.value}`" for field in PinnableAccountField)
+            + "."
+        ),
     )
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        if attrs["kind"] == AccountPropertyPinKind.ACCOUNT_FIELD.value:
+            return attrs
+        try:
+            return {**attrs, "id": UUID(attrs["id"])}
+        except ValueError:
+            raise serializers.ValidationError({"id": "Must be a valid UUID."})
 
 
 class TaskDigestPreferencesSerializer(serializers.Serializer):

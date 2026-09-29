@@ -32,7 +32,36 @@ export interface AccountRelationshipProperty {
     editable?: boolean
 }
 
-export type AccountSidebarProperty = AccountCustomProperty | AccountRelationshipProperty
+export type AccountFieldId = 'external_id'
+
+export interface AccountFieldDefinition {
+    id: AccountFieldId
+    name: string
+    // Mid-sentence form for the "Copied ... to clipboard" toast.
+    copyDescription: string
+}
+
+export const PINNABLE_ACCOUNT_FIELDS: AccountFieldDefinition[] = [
+    { id: 'external_id', name: 'External ID', copyDescription: 'external ID' },
+]
+
+export type AccountFieldValues = Record<AccountFieldId, string | null>
+
+export interface AccountFieldProperty {
+    key: string
+    kind: 'account_field'
+    definition: AccountFieldDefinition
+    value: string | null
+    editable: false
+}
+
+export type AccountSidebarProperty = AccountCustomProperty | AccountRelationshipProperty | AccountFieldProperty
+
+export const ACCOUNT_PROPERTY_KIND_LABELS: Record<AccountSidebarProperty['kind'], string> = {
+    custom: 'Custom property',
+    relationship: 'Relationship',
+    account_field: 'Account property',
+}
 
 export interface AccountPropertyOption {
     key: string
@@ -42,4 +71,12 @@ export interface AccountPropertyOption {
 
 export function isCustomPropertyEditable(provenance: AccountCustomPropertyProvenance): boolean {
     return provenance === 'manual' || provenance === 'workflow'
+}
+
+export function isSidebarPropertyEditable(property: AccountSidebarProperty): boolean {
+    return (
+        property.editable !== false &&
+        (property.kind === 'relationship' ||
+            (property.kind === 'custom' && isCustomPropertyEditable(property.provenance)))
+    )
 }

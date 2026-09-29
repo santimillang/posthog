@@ -101,16 +101,19 @@ describe('accountSidebarConfigLogic', () => {
         expect(pinnedPropertyToConfiguratorKey({ kind: 'relationship', id: 'shared-id' })).toBe(
             'relationship:shared-id'
         )
+        expect(pinnedPropertyToConfiguratorKey({ kind: 'account_field', id: 'external_id' })).toBe('field:external_id')
         expect(
             configuratorKeysToPinnedProperties([
                 'relationship:relationship-1',
                 'custom:custom-1',
+                'field:external_id',
                 'unknown:ignored',
                 'custom:',
             ])
         ).toEqual([
             { kind: 'relationship', id: 'relationship-1' },
             { kind: 'custom_property', id: 'custom-1' },
+            { kind: 'account_field', id: 'external_id' },
         ])
     })
 
@@ -183,8 +186,10 @@ describe('accountSidebarConfigLogic', () => {
             defaultMocks({
                 pinned_properties: [
                     { kind: 'custom_property', id: 'custom-1' },
+                    { kind: 'account_field', id: 'external_id' },
                     { kind: 'relationship', id: 'relationship-1' },
                     { kind: 'custom_property', id: 'missing' },
+                    { kind: 'account_field', id: 'unknown_field' },
                 ],
             })
         )
@@ -193,9 +198,13 @@ describe('accountSidebarConfigLogic', () => {
 
         expect(logic.values.resolvedPinnedProperties.map(({ reference }) => reference.id)).toEqual([
             'custom-1',
+            'external_id',
             'relationship-1',
         ])
-        expect(logic.values.stalePinnedProperties).toEqual([{ kind: 'custom_property', id: 'missing' }])
+        expect(logic.values.stalePinnedProperties).toEqual([
+            { kind: 'custom_property', id: 'missing' },
+            { kind: 'account_field', id: 'unknown_field' },
+        ])
     })
 
     it('supports configure, toggle, reorder, cancel, and the 50-property limit', async () => {
@@ -261,6 +270,7 @@ describe('accountSidebarConfigLogic', () => {
             await mountLogic()
             logic.actions.beginConfiguring(configuratorKey)
             logic.actions.togglePinnedProperty({ kind: 'relationship', id: 'relationship-1' })
+            logic.actions.togglePinnedProperty({ kind: 'account_field', id: 'external_id' })
 
             await expectLogic(logic, () => logic.actions.savePinnedProperties()).toDispatchActions([
                 'persistPinnedProperties',
@@ -278,6 +288,7 @@ describe('accountSidebarConfigLogic', () => {
                 pinned_properties: [
                     { kind: 'custom_property', id: 'custom-1' },
                     { kind: 'relationship', id: 'relationship-1' },
+                    { kind: 'account_field', id: 'external_id' },
                 ],
             })
             expect(logic.values.config?.pinned_properties).toEqual(
@@ -286,9 +297,10 @@ describe('accountSidebarConfigLogic', () => {
             expect(logic.values.activeConfiguratorKey).toBeNull()
             expect(logic.values.isConfiguring).toBe(false)
             expect(captureSpy).toHaveBeenCalledWith(AccountsEvents.PinnedPropertiesSaved, {
-                pinned_count: 2,
+                pinned_count: 3,
                 custom_property_count: 1,
                 relationship_count: 1,
+                account_field_count: 1,
             })
         }
     )

@@ -8,7 +8,7 @@ import {
     AccountRelationshipMember,
     AccountRelationshipProperty,
     AccountSidebarProperty,
-    isCustomPropertyEditable,
+    isSidebarPropertyEditable,
 } from './accountPropertyTypes'
 import { AccountPropertyValue } from './AccountPropertyValue'
 import { AccountRelationshipEditor } from './AccountRelationshipEditor'
@@ -42,9 +42,7 @@ export function AccountPropertyField({
     onSaveCustomProperty,
     onSaveRelationship,
 }: AccountPropertyFieldProps): JSX.Element {
-    const editable =
-        property.editable !== false &&
-        (property.kind === 'relationship' || isCustomPropertyEditable(property.provenance))
+    const editable = isSidebarPropertyEditable(property)
     const provenance =
         property.kind === 'custom' && property.provenance !== 'manual' ? PROVENANCE[property.provenance] : null
 
@@ -81,7 +79,7 @@ export function AccountPropertyField({
                             onSave={(value) => onSaveCustomProperty(property, value)}
                             onCancel={onCancel}
                         />
-                    ) : (
+                    ) : property.kind === 'relationship' ? (
                         <AccountRelationshipEditor
                             key={property.key}
                             definition={property.definition}
@@ -92,7 +90,7 @@ export function AccountPropertyField({
                             onSave={(memberIds) => onSaveRelationship(property, memberIds)}
                             onCancel={onCancel}
                         />
-                    )}
+                    ) : null}
                     {property.kind === 'custom' && property.provenance === 'workflow' ? (
                         <span className="text-xs text-secondary">A workflow may overwrite this value.</span>
                     ) : null}

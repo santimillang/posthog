@@ -829,7 +829,7 @@ function useExpandable(): QueryContext<DataTableNode>['expandable'] {
                     return null
                 }
                 return accountSceneEnabled ? (
-                    <AccountPinnedPropertiesExpansion accountId={cell.id} />
+                    <AccountPinnedPropertiesExpansion accountId={cell.id} externalId={cell.external_id ?? null} />
                 ) : (
                     <AccountNotebooksExpansion accountId={cell.id} externalId={cell.external_id ?? ''} />
                 )

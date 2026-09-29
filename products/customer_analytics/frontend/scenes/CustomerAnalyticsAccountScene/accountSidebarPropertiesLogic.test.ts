@@ -168,6 +168,33 @@ describe('accountSidebarPropertiesLogic', () => {
         expect(accountDataRequest).not.toHaveBeenCalled()
     })
 
+    it('shows a pinned external ID from the account as a read-only value', async () => {
+        useMocks({
+            get: {
+                '/api/projects/:project_id/user_customer_analytics_config/@me/': {
+                    pinned_properties: [
+                        { kind: 'account_field', id: 'external_id' },
+                        { kind: 'custom_property', id: definition.id },
+                    ],
+                },
+            },
+        })
+        logic = accountSidebarPropertiesLogic({ projectId: 1, accountId: 'account-1', externalId: 'org-123' })
+        logic.mount()
+        await expectLogic(logic).toFinishAllListeners()
+        await waitFor(() => expect(logic.values.sidebarProperties).toHaveLength(2))
+
+        const [externalId] = logic.values.sidebarProperties
+        expect(externalId).toMatchObject({
+            key: 'field:external_id',
+            kind: 'account_field',
+            value: 'org-123',
+            editable: false,
+        })
+        logic.actions.editProperty(externalId)
+        expect(logic.values.editingPropertyKey).toBeNull()
+    })
+
     it('blocks the panel only until properties load, then keeps them through a failed refresh', async () => {
         silenceKeaLoadersErrors()
         let accountDataFails = true

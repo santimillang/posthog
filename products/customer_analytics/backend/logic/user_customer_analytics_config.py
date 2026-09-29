@@ -8,7 +8,11 @@ from django.db import transaction
 from posthog.models.scoping.manager import resolve_effective_team_id
 
 from products.customer_analytics.backend.facade import contracts
-from products.customer_analytics.backend.facade.enums import AccountPropertyPinKind, TaskDigestCadence
+from products.customer_analytics.backend.facade.enums import (
+    AccountPropertyPinKind,
+    PinnableAccountField,
+    TaskDigestCadence,
+)
 from products.customer_analytics.backend.models import (
     AccountRelationshipDefinition,
     CustomPropertyDefinition,
@@ -18,6 +22,7 @@ from products.customer_analytics.backend.models import (
 
 PINNED_PROPERTIES_KEY = "pinned_properties"
 MAX_PINNED_PROPERTIES = 50
+PINNABLE_ACCOUNT_FIELDS = frozenset(field.value for field in PinnableAccountField)
 
 TASK_DIGEST_KEY = "task_digest"
 DEFAULT_TASK_DIGEST = contracts.TaskDigestPreferences()
@@ -59,7 +64,7 @@ def get_or_create_config(*, team_id: int, user_id: int) -> UserCustomerAnalytics
 
 @transaction.atomic
 def update_pinned_properties(
-    *, team_id: int, user_id: int, references: Sequence[tuple[AccountPropertyPinKind, UUID]]
+    *, team_id: int, user_id: int, references: Sequence[tuple[AccountPropertyPinKind, UUID | str]]
 ) -> UserCustomerAnalyticsConfig:
     _validate_pinned_properties(team_id=team_id, references=references)
     config = get_or_create_config(team_id=team_id, user_id=user_id)
@@ -68,7 +73,9 @@ def update_pinned_properties(
         PINNED_PROPERTIES_KEY: [{"kind": kind.value, "id": str(definition_id)} for kind, definition_id in references],
     }
     config.pinned_custom_property_definition_ids = [
-        definition_id for kind, definition_id in references if kind == AccountPropertyPinKind.CUSTOM_PROPERTY
+        definition_id
+        for kind, definition_id in references
+        if kind == AccountPropertyPinKind.CUSTOM_PROPERTY and isinstance(definition_id, UUID)
     ]
     config.save(update_fields=["properties", "pinned_custom_property_definition_ids", "updated_at"])
     return config
@@ -126,19 +133,21 @@ def _read_send_time(stored: dict[str, Any]) -> str:
     return DEFAULT_TASK_DIGEST.send_time
 
 
-def _validate_pinned_properties(*, team_id: int, references: Sequence[tuple[AccountPropertyPinKind, UUID]]) -> None:
+def _validate_pinned_properties(
+    *, team_id: int, references: Sequence[tuple[AccountPropertyPinKind, UUID | str]]
+) -> None:
     if len(references) > MAX_PINNED_PROPERTIES:
         raise InvalidPinnedAccountProperties([f"Pin at most {MAX_PINNED_PROPERTIES} account properties."])
 
     errors: list[str] = []
-    first_index_by_reference: dict[tuple[AccountPropertyPinKind, UUID], int] = {}
+    first_index_by_reference: dict[tuple[AccountPropertyPinKind, UUID | str], int] = {}
     for index, reference in enumerate(references):
         if reference in first_index_by_reference:
             errors.append(f"Item {index + 1} duplicates item {first_index_by_reference[reference] + 1}.")
         else:
             first_index_by_reference[reference] = index
 
-    referenced_ids = {definition_id for _, definition_id in references}
+    referenced_ids = {definition_id for _, definition_id in references if isinstance(definition_id, UUID)}
     custom_property_targets = dict(
         CustomPropertyDefinition.objects.for_team(team_id)
         .filter(id__in=referenced_ids)
@@ -152,7 +161,10 @@ def _validate_pinned_properties(*, team_id: int, references: Sequence[tuple[Acco
 
     for index, (kind, definition_id) in enumerate(references):
         item = index + 1
-        if kind == AccountPropertyPinKind.CUSTOM_PROPERTY:
+        if kind == AccountPropertyPinKind.ACCOUNT_FIELD:
+            if definition_id not in PINNABLE_ACCOUNT_FIELDS:
+                errors.append(f"Item {item} account field cannot be pinned.")
+        elif kind == AccountPropertyPinKind.CUSTOM_PROPERTY:
             target_type = custom_property_targets.get(definition_id)
             if target_type is not None:
                 if target_type != TargetType.ACCOUNT.value:

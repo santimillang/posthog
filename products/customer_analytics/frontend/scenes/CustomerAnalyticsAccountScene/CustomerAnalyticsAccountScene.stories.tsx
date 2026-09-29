@@ -256,6 +256,7 @@ const pinnedDecorator = mswDecorator({
     get: {
         [ACCOUNT_SIDEBAR_CONFIG_ENDPOINT]: {
             pinned_properties: [
+                { kind: 'account_field', id: 'external_id' },
                 ...pinnedDefinitions.map(({ definition }) => ({ kind: 'custom_property', id: definition.id })),
                 ...pinnedRelationships.map(({ id }) => ({ kind: 'relationship', id })),
             ],

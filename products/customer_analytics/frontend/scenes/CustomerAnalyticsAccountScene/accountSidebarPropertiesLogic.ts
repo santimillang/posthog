@@ -43,11 +43,13 @@ import {
     AccountRelationshipMember,
     AccountSidebarProperty,
     isCustomPropertyEditable,
+    isSidebarPropertyEditable,
 } from './components/accountPropertyTypes'
 
 export interface AccountSidebarPropertiesLogicProps {
     accountId: string
     projectId: number
+    externalId?: string | null
 }
 
 export type AccountPropertiesPanelState = 'loading' | 'failed' | 'ready'
@@ -246,7 +248,8 @@ export interface accountSidebarPropertiesLogicMeta {
     __keaTypeGenInternalSelectorTypes: {
         sidebarProperties: (
             resolvedPinnedProperties: ResolvedPinnedAccountProperty[],
-            propertyData: AccountSidebarPropertyData | null
+            propertyData: AccountSidebarPropertyData | null,
+            externalId: string | null
         ) => AccountSidebarProperty[]
         availableMembers: (
             members: OrganizationMemberType[] | null,
@@ -445,11 +448,7 @@ export const accountSidebarPropertiesLogic: LogicWrapper<accountSidebarPropertie
             editingPropertyKey: [
                 null as string | null,
                 {
-                    editProperty: (state, { property }) =>
-                        property.editable !== false &&
-                        (property.kind === 'relationship' || isCustomPropertyEditable(property.provenance))
-                            ? property.key
-                            : state,
+                    editProperty: (state, { property }) => (isSidebarPropertyEditable(property) ? property.key : state),
                     cancelEditing: () => null,
                     persistCustomPropertySuccess: () => null,
                     persistRelationshipSuccess: () => null,
@@ -488,15 +487,17 @@ export const accountSidebarPropertiesLogic: LogicWrapper<accountSidebarPropertie
         }),
         selectors({
             sidebarProperties: [
-                (s) => [s.resolvedPinnedProperties, s.propertyData],
+                (s) => [s.resolvedPinnedProperties, s.propertyData, (_, props) => props.externalId ?? null],
                 (
                     pinned: ResolvedPinnedAccountProperty[],
-                    data: AccountSidebarPropertyData | null
+                    data: AccountSidebarPropertyData | null,
+                    externalId: string | null
                 ): AccountSidebarProperty[] =>
                     buildAccountSidebarProperties(
                         pinned,
                         data,
-                        userHasAccess(AccessControlResourceType.CustomerAnalytics, AccessControlLevel.Editor)
+                        userHasAccess(AccessControlResourceType.CustomerAnalytics, AccessControlLevel.Editor),
+                        { external_id: externalId }
                     ),
             ],
             availableMembers: [

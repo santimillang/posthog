@@ -99,7 +99,7 @@ describe('AccountPinnedPropertiesExpansion', () => {
     let logic: ReturnType<typeof accountSidebarPropertiesLogic.build>
 
     const renderExpansion = async (): Promise<void> => {
-        render(<AccountPinnedPropertiesExpansion accountId="account-1" />)
+        render(<AccountPinnedPropertiesExpansion accountId="account-1" externalId={null} />)
         logic = accountSidebarPropertiesLogic({
             projectId: projectLogic.values.currentProjectId!,
             accountId: 'account-1',
@@ -202,8 +202,8 @@ describe('AccountPinnedPropertiesExpansion', () => {
         })
         const { container } = render(
             <>
-                <AccountPinnedPropertiesExpansion accountId={account.id} />
-                <AccountPinnedPropertiesExpansion accountId="account-2" />
+                <AccountPinnedPropertiesExpansion accountId={account.id} externalId={account.external_id ?? null} />
+                <AccountPinnedPropertiesExpansion accountId="account-2" externalId={null} />
                 <BindLogic logic={customerAnalyticsAccountSceneLogic} props={{ accountId: account.id }}>
                     <AccountSidebar account={account} />
                 </BindLogic>

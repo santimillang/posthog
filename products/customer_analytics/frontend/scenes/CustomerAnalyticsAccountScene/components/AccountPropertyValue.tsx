@@ -2,6 +2,7 @@ import { IconCheck, IconX } from '@posthog/icons'
 import { LemonColorGlyph, Link, ProfilePicture } from '@posthog/lemon-ui'
 
 import { DataColorToken } from 'lib/colors'
+import { CopyToClipboardInline } from 'lib/components/CopyToClipboard'
 import { TZLabel } from 'lib/components/TZLabel'
 import { dayjs } from 'lib/dayjs'
 
@@ -13,6 +14,25 @@ export interface AccountPropertyValueProps {
 }
 
 export function AccountPropertyValue({ property }: AccountPropertyValueProps): JSX.Element {
+    if (property.kind === 'account_field') {
+        if (!property.value) {
+            return <span className="text-sm text-muted">Not set</span>
+        }
+
+        return (
+            <span className="flex items-center gap-1 min-w-0">
+                <span className="text-sm font-medium truncate select-all" title={property.value}>
+                    {property.value}
+                </span>
+                <CopyToClipboardInline
+                    explicitValue={property.value}
+                    description={property.definition.copyDescription}
+                    iconSize="xsmall"
+                />
+            </span>
+        )
+    }
+
     if (property.kind === 'relationship') {
         if (property.members.length === 0) {
             return <span className="text-sm text-muted">Unassigned</span>

@@ -104,6 +104,7 @@ class TestUserCustomerAnalyticsConfigAPI(APIBaseTest):
         pinned_properties = [
             {"kind": "custom_property", "id": str(first_custom.id)},
             {"kind": "relationship", "id": str(relationship.id)},
+            {"kind": "account_field", "id": "external_id"},
             {"kind": "custom_property", "id": str(second_custom.id)},
         ]
 
@@ -243,6 +244,7 @@ class TestUserCustomerAnalyticsConfigAPI(APIBaseTest):
             ("custom as relationship", [{"kind": "relationship", "id": str(valid_custom.id)}], "custom property"),
             ("foreign team", [{"kind": "custom_property", "id": str(foreign_custom.id)}], "not found"),
             ("unknown", [{"kind": "relationship", "id": str(uuid4())}], "not found"),
+            ("unpinnable account field", [{"kind": "account_field", "id": "name"}], "cannot be pinned"),
             ("over limit", [valid_reference] * 51, "at most 50"),
         ]
 

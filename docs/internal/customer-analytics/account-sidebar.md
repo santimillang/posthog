@@ -1,6 +1,7 @@
 # Account detail sidebar properties
 
-Each user can pin up to 50 account custom properties and relationships in their project.
+Each user can pin up to 50 account custom properties, relationships, and account fields in their project.
+The external ID is the only account field you can pin. It is read-only, and a click copies it.
 When `customer-analytics-account-scene` is enabled, the Accounts list also shows these pins in expanded rows.
 The left arrow expands or collapses the row. The account name opens account details.
 Expanded pins use the same Properties section and editable fields as the account sidebar.

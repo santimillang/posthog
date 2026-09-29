@@ -6,6 +6,11 @@ from django.db import models
 class AccountPropertyPinKind(str, Enum):
     CUSTOM_PROPERTY = "custom_property"
     RELATIONSHIP = "relationship"
+    ACCOUNT_FIELD = "account_field"
+
+
+class PinnableAccountField(str, Enum):
+    EXTERNAL_ID = "external_id"
 
 
 class TaskDigestCadence(models.TextChoices):
@@ -50,5 +55,6 @@ __all__ = [
     "AccountRelationshipSource",
     "OwnershipRoleDiagnostic",
     "OwnershipRoleState",
+    "PinnableAccountField",
     "TaskDigestCadence",
 ]

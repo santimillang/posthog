@@ -57,7 +57,7 @@ export function AccountSidebar({ account }: { account: AccountApi }): JSX.Elemen
                 />
             </div>
             <LemonDivider className="my-0" />
-            <AccountPinnedPropertiesPanel accountId={account.id} />
+            <AccountPinnedPropertiesPanel accountId={account.id} externalId={account.external_id ?? null} />
             <AccountEditModal />
             <AccountEventStreamModal />
         </aside>

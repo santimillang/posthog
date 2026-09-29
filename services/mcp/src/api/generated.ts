@@ -79971,6 +79971,7 @@ export namespace Schemas {
     /**
      * * `custom_property` - Custom property
      * * `relationship` - Relationship
+     * * `account_field` - Account field
      */
     export type PinnedAccountPropertyKindEnum = typeof PinnedAccountPropertyKindEnum[keyof typeof PinnedAccountPropertyKindEnum];
 
@@ -79978,15 +79979,17 @@ export namespace Schemas {
     export const PinnedAccountPropertyKindEnum = {
       CustomProperty: 'custom_property',
       Relationship: 'relationship',
+      AccountField: 'account_field',
     } as const;
 
     export interface PinnedAccountProperty {
-      /** Definition type for this pinned account property.
+      /** Type of this pinned account property.
        *
        * * `custom_property` - Custom property
-       * * `relationship` - Relationship */
+       * * `relationship` - Relationship
+       * * `account_field` - Account field */
       kind: PinnedAccountPropertyKindEnum;
-      /** Team-scoped custom property or relationship definition UUID. */
+      /** Team-scoped custom property or relationship definition UUID. For an account field, the field name: `external_id`. */
       id: string;
     }
 

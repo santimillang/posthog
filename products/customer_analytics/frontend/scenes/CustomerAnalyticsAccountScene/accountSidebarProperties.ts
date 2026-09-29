@@ -4,7 +4,7 @@ import type {
 } from 'products/customer_analytics/frontend/generated/api.schemas'
 
 import { pinnedPropertyToConfiguratorKey, ResolvedPinnedAccountProperty } from './accountSidebarConfigLogic'
-import type { AccountSidebarProperty } from './components/accountPropertyTypes'
+import type { AccountFieldValues, AccountSidebarProperty } from './components/accountPropertyTypes'
 
 export interface AccountSidebarPropertyData {
     customValues: CustomPropertyValueApi[]
@@ -14,7 +14,8 @@ export interface AccountSidebarPropertyData {
 export function buildAccountSidebarProperties(
     pinnedProperties: ResolvedPinnedAccountProperty[],
     data: AccountSidebarPropertyData | null,
-    editable: boolean
+    editable: boolean,
+    accountFields: AccountFieldValues
 ): AccountSidebarProperty[] {
     if (!data) {
         return []
@@ -22,6 +23,15 @@ export function buildAccountSidebarProperties(
     const valuesByDefinition = new Map(data.customValues.map((value) => [value.definition_id, value.value]))
     return pinnedProperties.map((property): AccountSidebarProperty => {
         const key = pinnedPropertyToConfiguratorKey(property.reference)
+        if (property.kind === 'account_field') {
+            return {
+                key,
+                kind: 'account_field',
+                definition: property.definition,
+                value: accountFields[property.definition.id] || null,
+                editable: false,
+            }
+        }
         if (property.kind === 'custom_property') {
             const { definition } = property
             return {

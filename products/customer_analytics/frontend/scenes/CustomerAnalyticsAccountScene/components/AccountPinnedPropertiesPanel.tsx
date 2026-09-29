@@ -13,16 +13,18 @@ import {
 import { AccountPropertyEditSource, accountSidebarPropertiesLogic } from '../accountSidebarPropertiesLogic'
 import { AccountPinnedProperties, AccountPinnedPropertiesProps } from './AccountPinnedProperties'
 import { AccountPropertyConfigurator } from './AccountPropertyConfigurator'
-import type { AccountPropertyOption } from './accountPropertyTypes'
+import { AccountPropertyOption, PINNABLE_ACCOUNT_FIELDS } from './accountPropertyTypes'
 
 export interface AccountPinnedPropertiesPanelProps {
     accountId: string
+    externalId: string | null
     layout?: AccountPinnedPropertiesProps['layout']
     source?: AccountPropertyEditSource
 }
 
 export function AccountPinnedPropertiesPanel({
     accountId,
+    externalId,
     layout = 'vertical',
     source = 'account_sidebar',
 }: AccountPinnedPropertiesPanelProps): JSX.Element {
@@ -47,7 +49,7 @@ export function AccountPinnedPropertiesPanel({
         savePinnedProperties,
         setDraftPinnedProperties,
     } = useActions(configLogic)
-    const propertyLogic = accountSidebarPropertiesLogic({ accountId, projectId })
+    const propertyLogic = accountSidebarPropertiesLogic({ accountId, projectId, externalId })
     const {
         sidebarProperties,
         propertiesPanelState,
@@ -71,6 +73,11 @@ export function AccountPinnedPropertiesPanel({
     }
     const configuratorKey = `${source}:${accountId}`
     const propertyOptions: AccountPropertyOption[] = [
+        ...PINNABLE_ACCOUNT_FIELDS.map((definition) => ({
+            key: pinnedPropertyToConfiguratorKey({ kind: 'account_field', id: definition.id }),
+            label: definition.name,
+            kind: 'account_field' as const,
+        })),
         ...(availableDefinitions?.customProperties ?? []).map((definition) => ({
             key: pinnedPropertyToConfiguratorKey({ kind: 'custom_property', id: definition.id }),
             label: definition.name,
