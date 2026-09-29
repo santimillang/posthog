@@ -47,6 +47,7 @@ logger = structlog.get_logger(__name__)
 
 SLACK_APP_AGENT_DESIGN_FLAG = "slack-app-agent-design"
 SLACK_APP_FORKING_FLAG = "slack-app-forking"
+SLACK_APP_BARE_MENTION_REPLY_FLAG = "slack-app-bare-mention-reply"
 
 
 # Linking a Slack identity to a PostHog user resolves the Slack profile and its email.
@@ -121,6 +122,17 @@ def is_slack_app_agent_design_enabled(integration: Integration, distinct_id: str
         SLACK_APP_AGENT_DESIGN_FLAG,
         integration,
         failure_log_key="slack_app_agent_design_feature_flag_check_failed",
+        distinct_id=distinct_id,
+    )
+
+
+def is_slack_app_bare_mention_reply_enabled(integration: Integration, distinct_id: str | None = None) -> bool:
+    """Gate for answering a mention that carries no request without a run. With the gate
+    closed, such a mention starts a run."""
+    return _workspace_flag_enabled(
+        SLACK_APP_BARE_MENTION_REPLY_FLAG,
+        integration,
+        failure_log_key="slack_app_bare_mention_reply_feature_flag_check_failed",
         distinct_id=distinct_id,
     )
 
