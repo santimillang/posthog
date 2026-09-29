@@ -5375,7 +5375,7 @@ class TestHogFlowVersionedMetrics(ClickhouseTestMixin, APIBaseTest):
         assert version_two.json()["totals"] == {"success": 5}
         assert whole.json()["totals"] == {"success": 7}
 
-    @patch("products.workflows.backend.api.hog_flow.posthoganalytics.feature_enabled", return_value=True)
+    @patch("products.workflows.backend.presentation.views.hog_flow.posthoganalytics.feature_enabled", return_value=True)
     def test_a_suggestion_carries_what_posthog_measured_next_to_what_it_claimed(self, _mock_flag):
         HogFlow.objects.filter(id=self.flow.id).update(
             actions=[{"id": "email_1", "type": "function_email", "name": "Email", "config": {}}], status="active"
@@ -5429,9 +5429,9 @@ class TestHogFlowVersionedMetrics(ClickhouseTestMixin, APIBaseTest):
         }
         assert {g["metric"]: g["value"] for g in measured["guardrails"]}["bounce rate"] == 0.02
 
-    @patch("products.workflows.backend.api.hog_flow.posthoganalytics.feature_enabled", return_value=True)
+    @patch("products.workflows.backend.presentation.views.hog_flow.posthoganalytics.feature_enabled", return_value=True)
     @patch(
-        "products.workflows.backend.api.hog_flow.fetch_app_metric_totals",
+        "products.workflows.backend.presentation.views.hog_flow.fetch_app_metric_totals",
         side_effect=Exception("clickhouse is down"),
     )
     def test_a_producer_cannot_pass_off_its_own_numbers_as_posthogs(self, _mock_totals, _mock_flag):
