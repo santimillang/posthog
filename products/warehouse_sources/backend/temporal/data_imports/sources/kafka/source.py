@@ -202,7 +202,7 @@ class KafkaSource(SimpleSource[KafkaSourceConfig], CursorSource[KafkaCursor]):
             SourceSchema(
                 name=topic,
                 supports_incremental=True,
-                supports_append=True,
+                supports_append=False,
                 incremental_fields=INCREMENTAL_FIELDS,
                 detected_primary_keys=PRIMARY_KEYS,
             )

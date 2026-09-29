@@ -23,6 +23,13 @@ _CONFIG = KafkaSourceConfig.from_dict(
 )
 
 
+def test_kafka_requires_incremental_merge() -> None:
+    with patch(_FETCH_CLUSTER, return_value=KafkaCluster(topics=["orders"])):
+        schema = KafkaSource().get_schemas(_CONFIG, team_id=1)[0]
+    assert schema.supports_incremental is True
+    assert schema.supports_append is False
+
+
 class TestValidateCredentials:
     @parameterized.expand(
         [

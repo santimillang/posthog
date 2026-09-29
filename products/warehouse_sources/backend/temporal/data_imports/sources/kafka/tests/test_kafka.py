@@ -26,9 +26,12 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.kafka.kafk
     KAFKA_CLOUD_UNAVAILABLE_MESSAGE,
     MISSING_SASL_CREDENTIALS_MESSAGE,
     UNREACHABLE_MESSAGE,
+    KafkaCluster,
+    KafkaCursor,
     KafkaSourceError,
     build_client_config,
     fetch_cluster,
+    kafka_source,
     message_to_row,
     parse_bootstrap_hosts,
     read_partitions,
@@ -170,10 +173,18 @@ class TestMessageToRow:
         assert row == expected_payload
         assert envelope["_kafka_tombstone"] is (value is None)
 
-    def test_envelope_wins_over_a_payload_field_of_the_same_name(self) -> None:
-        message = _FakeMessage(2, 7, value=b'{"_kafka_offset": 99, "_kafka_partition": 5}')
+    def test_reserved_and_invalid_payload_fields_are_namespaced(self) -> None:
+        message = _FakeMessage(
+            2,
+            7,
+            value=b'{"_kafka_offset": 99, "_ph_debug": "payload", "not valid!": true, "ok": 1}',
+        )
         row = message_to_row(cast(Message, message), "json")
         assert (row["_kafka_partition"], row["_kafka_offset"]) == (2, 7)
+        assert row["ok"] == 1
+        assert "_ph_debug" not in row
+        assert any(key.startswith("_kafka_payload_not_valid_") for key in row)
+        assert len([key for key in row if key.startswith("_kafka_payload_")]) == 3
 
     def test_envelope(self) -> None:
         message = _FakeMessage(1, 3, key=b"user-1", headers=[("trace", b"abc"), ("empty", None)])
@@ -184,7 +195,25 @@ class TestMessageToRow:
 
     def test_message_without_a_timestamp(self) -> None:
         message = _FakeMessage(0, 0, timestamp=(TIMESTAMP_NOT_AVAILABLE, -1))
-        assert message_to_row(cast(Message, message), "json")["_kafka_timestamp"] is None
+        row = message_to_row(cast(Message, message), "json")
+        assert row["_kafka_timestamp"] is None
+        assert row["_kafka_timestamp_ms"] is None
+
+    def test_out_of_range_timestamp_keeps_raw_milliseconds(self) -> None:
+        timestamp_ms = 2**63 - 1
+        message = _FakeMessage(0, 0, timestamp=(TIMESTAMP_CREATE_TIME, timestamp_ms))
+        row = message_to_row(cast(Message, message), "json")
+        assert row["_kafka_timestamp"] is None
+        assert row["_kafka_timestamp_ms"] == timestamp_ms
+
+    def test_binary_key_headers_and_raw_value_are_base64_encoded(self) -> None:
+        message = _FakeMessage(0, 0, value=b"\xff", key=b"\xfe", headers=[("binary", b"\xfd")])
+        row = message_to_row(cast(Message, message), "json")
+        assert row["_kafka_raw_value"] == "/w=="
+        assert row["_kafka_raw_value_encoding"] == "base64"
+        assert row["_kafka_key"] == "/g=="
+        assert row["_kafka_key_encoding"] == "base64"
+        assert row["_kafka_headers"] == '[["binary",{"data":"/Q==","encoding":"base64"}]]'
 
 
 class TestReadPartitions:
@@ -231,6 +260,67 @@ class TestReadPartitions:
         broken = _FakeMessage(0, 0, error=KafkaError(KafkaError.TOPIC_AUTHORIZATION_FAILED))  # type: ignore[attr-defined]
         with pytest.raises(KafkaException):
             _read(_FakeConsumer([[broken]]), starts={0: 0}, ends={0: 5})
+
+
+class TestKafkaSourceSetup:
+    @staticmethod
+    def _topic_metadata(error: KafkaError | None = None) -> MagicMock:
+        return MagicMock(error=error, partitions={0: MagicMock()})
+
+    @staticmethod
+    def _topic_description(topic_id: str = "topic-id") -> MagicMock:
+        future = MagicMock()
+        future.result.return_value = MagicMock(topic_id=topic_id)
+        return MagicMock(describe_topics=MagicMock(return_value={"orders": future}))
+
+    def test_consumer_reads_only_committed_records(self) -> None:
+        consumer = MagicMock()
+        consumer.list_topics.return_value = MagicMock(topics={"orders": self._topic_metadata()})
+        consumer.get_watermark_offsets.return_value = (0, 0)
+        cursor = MagicMock()
+        cursor.load.return_value = None
+        with (
+            patch(f"{_MODULE}.fetch_cluster", return_value=KafkaCluster(topics=["orders"])),
+            patch(f"{_MODULE}.Consumer", return_value=consumer) as consumer_class,
+            patch(f"{_MODULE}.AdminClient", return_value=self._topic_description()),
+        ):
+            response = kafka_source(_config(), "orders", 1, cursor, True, MagicMock())
+
+        assert consumer_class.call_args.args[0]["isolation.level"] == "read_committed"
+        assert list(response.items()) == []
+        consumer.close.assert_called_once()
+
+    def test_topic_metadata_error_closes_the_consumer(self) -> None:
+        consumer = MagicMock()
+        consumer.list_topics.return_value = MagicMock(
+            topics={"orders": self._topic_metadata(KafkaError(KafkaError.UNKNOWN_TOPIC_OR_PART))}
+        )
+        with (
+            patch(f"{_MODULE}.fetch_cluster", return_value=KafkaCluster(topics=["orders"])),
+            patch(f"{_MODULE}.Consumer", return_value=consumer),
+            patch(f"{_MODULE}.AdminClient") as admin,
+            pytest.raises(KafkaSourceError, match=re.escape("topic for this table no longer exists")),
+        ):
+            kafka_source(_config(), "orders", 1, MagicMock(), True, MagicMock())
+
+        consumer.close.assert_called_once()
+        admin.assert_not_called()
+
+    def test_changed_topic_identity_rebuilds_from_the_low_watermark(self) -> None:
+        consumer = MagicMock()
+        consumer.list_topics.return_value = MagicMock(topics={"orders": self._topic_metadata()})
+        consumer.get_watermark_offsets.return_value = (3, 5)
+        cursor = MagicMock()
+        cursor.load.return_value = KafkaCursor(offsets={"0": 100}, topic_id="old-topic-id")
+        with (
+            patch(f"{_MODULE}.fetch_cluster", return_value=KafkaCluster(topics=["orders"])),
+            patch(f"{_MODULE}.Consumer", return_value=consumer),
+            patch(f"{_MODULE}.AdminClient", return_value=self._topic_description("new-topic-id")),
+        ):
+            response = kafka_source(_config(), "orders", 1, cursor, True, MagicMock())
+
+        assert response.destination_reset_required is True
+        assert response.rows_to_sync == 2
 
 
 class TestClientConfig:

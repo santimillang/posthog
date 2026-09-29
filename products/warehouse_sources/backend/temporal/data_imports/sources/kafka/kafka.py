@@ -1,17 +1,28 @@
 import time
+import base64
+import hashlib
 import logging
 import datetime
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any, ClassVar, Literal
 
 import orjson
-from confluent_kafka import TIMESTAMP_NOT_AVAILABLE, Consumer, KafkaError, KafkaException, Message, TopicPartition
+from confluent_kafka import (
+    TIMESTAMP_NOT_AVAILABLE,
+    Consumer,
+    KafkaError,
+    KafkaException,
+    Message,
+    TopicCollection,
+    TopicPartition,
+)
 from confluent_kafka.admin import AdminClient
 from structlog.types import FilteringBoundLogger
 
 from posthog.cloud_utils import is_cloud
 from posthog.dataclasses import frozen
 
+from products.warehouse_sources.backend.temporal.data_imports.naming_convention import NamingConvention
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.cursor import SourceCursorManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import (
     DATABASE_HOST_NOT_ALLOWED_ERROR,
@@ -29,15 +40,19 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.kafka.sett
     IDLE_TIMEOUT_SECONDS,
     INTERNAL_TOPIC_PREFIX,
     KEY_COLUMN,
+    KEY_ENCODING_COLUMN,
     METADATA_TIMEOUT_SECONDS,
     OFFSET_COLUMN,
     PARTITION_COLUMN,
     PRIMARY_KEYS,
     RAW_VALUE_COLUMN,
+    RAW_VALUE_ENCODING_COLUMN,
     TIMESTAMP_COLUMN,
+    TIMESTAMP_MS_COLUMN,
     TOMBSTONE_COLUMN,
     TOPIC_COLUMN,
     VALUE_COLUMN,
+    VALUE_ENCODING_COLUMN,
     WATERMARK_TIMEOUT_SECONDS,
 )
 
@@ -93,6 +108,7 @@ class KafkaCursor:
     cursor_kind: ClassVar[str] = "kafka_offsets"
 
     offsets: dict[str, int]
+    topic_id: str | None = None
 
 
 @frozen
@@ -225,10 +241,58 @@ def resolve_start_offsets(
     return starts
 
 
-def _decode(data: bytes | str | None) -> str | None:
-    if data is None or isinstance(data, str):
-        return data
-    return data.decode("utf-8", errors="replace")
+_RESERVED_PAYLOAD_COLUMNS = frozenset(
+    {
+        TOPIC_COLUMN,
+        PARTITION_COLUMN,
+        OFFSET_COLUMN,
+        TIMESTAMP_COLUMN,
+        TIMESTAMP_MS_COLUMN,
+        KEY_COLUMN,
+        KEY_ENCODING_COLUMN,
+        HEADERS_COLUMN,
+        TOMBSTONE_COLUMN,
+        RAW_VALUE_COLUMN,
+        RAW_VALUE_ENCODING_COLUMN,
+        VALUE_COLUMN,
+        VALUE_ENCODING_COLUMN,
+        "_ph_debug",
+        "_ph_partition_key",
+        "_dlt_id",
+        "_dlt_load_id",
+    }
+)
+
+
+def _decode_losslessly(data: bytes | str | None) -> tuple[str | None, str | None]:
+    if data is None:
+        return None, None
+    if isinstance(data, str):
+        return data, "utf-8"
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return base64.b64encode(data).decode("ascii"), "base64"
+
+
+def _payload_column_name(name: str) -> str:
+    try:
+        normalized = NamingConvention.normalize_identifier(name)
+    except ValueError:
+        normalized = "column"
+    if name == normalized and normalized not in _RESERVED_PAYLOAD_COLUMNS and not normalized.startswith("_kafka_"):
+        return normalized
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return f"_kafka_payload_{normalized}_{digest}"
+
+
+def _timestamp(timestamp_type: int, timestamp_ms: int) -> datetime.datetime | None:
+    if timestamp_type == TIMESTAMP_NOT_AVAILABLE:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(timestamp_ms / 1000, tz=datetime.UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def message_to_row(message: Message, value_format: Literal["json", "text"]) -> dict[str, Any]:
@@ -236,36 +300,39 @@ def message_to_row(message: Message, value_format: Literal["json", "text"]) -> d
     value = message.value()
     if value is not None:
         if value_format == "text":
-            row[VALUE_COLUMN] = _decode(value)
+            row[VALUE_COLUMN], row[VALUE_ENCODING_COLUMN] = _decode_losslessly(value)
         else:
             try:
                 decoded = orjson.loads(value)
             except orjson.JSONDecodeError:
-                row[RAW_VALUE_COLUMN] = _decode(value)
+                row[RAW_VALUE_COLUMN], row[RAW_VALUE_ENCODING_COLUMN] = _decode_losslessly(value)
             else:
                 if isinstance(decoded, dict):
-                    row.update(decoded)
+                    row.update({_payload_column_name(key): item for key, item in decoded.items()})
                 else:
                     # Stored as JSON text, so a topic that mixes numbers and strings keeps one column type.
                     row[VALUE_COLUMN] = orjson.dumps(decoded).decode()
 
     timestamp_type, timestamp_ms = message.timestamp()
+    key, key_encoding = _decode_losslessly(message.key())
     headers = message.headers()
-    # Set after the payload so a payload field of the same name never replaces the message's identity.
+    encoded_headers = []
+    for name, data in headers.items() if isinstance(headers, dict) else headers or []:
+        decoded_header, encoding = _decode_losslessly(data)
+        encoded_headers.append(
+            [name, {"data": decoded_header, "encoding": encoding}] if encoding == "base64" else [name, decoded_header]
+        )
+
     row.update(
         {
             TOPIC_COLUMN: message.topic(),
             PARTITION_COLUMN: message.partition(),
             OFFSET_COLUMN: message.offset(),
-            TIMESTAMP_COLUMN: None
-            if timestamp_type == TIMESTAMP_NOT_AVAILABLE
-            else datetime.datetime.fromtimestamp(timestamp_ms / 1000, tz=datetime.UTC),
-            KEY_COLUMN: _decode(message.key()),
-            HEADERS_COLUMN: orjson.dumps(
-                [[name, _decode(data)] for name, data in (headers.items() if isinstance(headers, dict) else headers)]
-            ).decode()
-            if headers
-            else None,
+            TIMESTAMP_COLUMN: _timestamp(timestamp_type, timestamp_ms),
+            TIMESTAMP_MS_COLUMN: None if timestamp_type == TIMESTAMP_NOT_AVAILABLE else timestamp_ms,
+            KEY_COLUMN: key,
+            KEY_ENCODING_COLUMN: key_encoding,
+            HEADERS_COLUMN: orjson.dumps(encoded_headers).decode() if headers else None,
             TOMBSTONE_COLUMN: value is None,
         }
     )
@@ -354,35 +421,66 @@ def kafka_source(
         raise KafkaSourceError(TOPIC_NOT_FOUND_MESSAGE)
 
     errors = _ErrorCollector()
+    client_config = build_client_config(config, errors)
     consumer = Consumer(
         {
-            **build_client_config(config, errors),
+            **client_config,
             # Required by the client, though the source assigns partitions itself and never joins or
             # commits to the group, so a customer's own consumer groups are never touched.
             "group.id": f"{CLIENT_ID}-{team_id}",
             "enable.auto.commit": False,
             "enable.auto.offset.store": False,
             "enable.partition.eof": True,
+            "isolation.level": "read_committed",
         }
     )
     try:
         topic_metadata = consumer.list_topics(topic, timeout=METADATA_TIMEOUT_SECONDS).topics[topic]
+        if topic_metadata.error is not None:
+            raise KafkaSourceError(TOPIC_NOT_FOUND_MESSAGE)
+        try:
+            topic_description = (
+                AdminClient(client_config)
+                .describe_topics(TopicCollection([topic]), request_timeout=METADATA_TIMEOUT_SECONDS)[topic]
+                .result(timeout=METADATA_TIMEOUT_SECONDS)
+            )
+        except KafkaException as e:
+            raise KafkaSourceError(TOPIC_NOT_FOUND_MESSAGE) from e
+        topic_id = str(topic_description.topic_id)
         watermarks = {
             partition: consumer.get_watermark_offsets(
                 TopicPartition(topic, partition), timeout=WATERMARK_TIMEOUT_SECONDS, cached=False
             )
             for partition in topic_metadata.partitions
         }
-    except KafkaException as e:
+    except Exception as e:
         consumer.close()
-        raise errors.user_error() from e
+        if isinstance(e, KafkaException):
+            raise errors.user_error() from e
+        raise
 
-    stored = cursor.load()
-    starts = resolve_start_offsets(stored.offsets if resume and stored is not None else None, watermarks, logger)
-    ends = {partition: high for partition, (_, high) in watermarks.items()}
+    try:
+        stored = cursor.load()
+        topic_recreated = bool(resume and stored is not None and stored.topic_id and stored.topic_id != topic_id)
+        if topic_recreated:
+            logger.warning(
+                "Kafka topic identity changed, rebuilding the destination from the new topic",
+                old_topic_id=stored.topic_id,
+                new_topic_id=topic_id,
+            )
+        stored_offsets = stored.offsets if resume and stored is not None and not topic_recreated else None
+        starts = resolve_start_offsets(stored_offsets, watermarks, logger)
+        ends = {partition: high for partition, (_, high) in watermarks.items()}
+    except Exception:
+        consumer.close()
+        raise
 
     def on_progress(next_offsets: dict[int, int]) -> None:
-        cursor.stage(KafkaCursor(offsets={str(partition): offset for partition, offset in next_offsets.items()}))
+        cursor.stage(
+            KafkaCursor(
+                offsets={str(partition): offset for partition, offset in next_offsets.items()}, topic_id=topic_id
+            )
+        )
 
     def items() -> Iterator[list[dict[str, Any]]]:
         try:
@@ -399,4 +497,5 @@ def kafka_source(
         # Messages arrive ordered by offset within a partition, not by timestamp across partitions.
         sort_mode="desc",
         rows_to_sync=sum(ends[partition] - starts[partition] for partition in starts),
+        destination_reset_required=topic_recreated,
     )
