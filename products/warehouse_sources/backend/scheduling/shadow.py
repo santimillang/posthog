@@ -52,17 +52,25 @@ class SchemaCadence:
 
 
 @frozen
+class InScopeSchema:
+    schema_id: str
+    team_id: int
+    interval: timedelta
+    sync_time_of_day: time | None
+
+
+@frozen
 class EvaluationResult:
     records: tuple[DecisionRecord, ...]
     missed_windows: int
 
 
-def _jitter_timedelta(max_jitter: timedelta, rng: random.Random) -> tuple[int, int]:
+def _jitter_minutes(max_jitter: timedelta, rng: random.Random) -> int:
     """Exact port of ``service._jitter_timedelta``: one uniform draw, split into
-    whole hours and whole minutes (seconds truncated)."""
+    whole hours times sixty plus whole minutes (seconds truncated)."""
     total_seconds = max_jitter.total_seconds()
     jitter_seconds = rng.uniform(0, total_seconds)
-    return (int(jitter_seconds // 3600), int((jitter_seconds % 3600) // 60))
+    return int(jitter_seconds // 3600) * 60 + int((jitter_seconds % 3600) // 60)
 
 
 def schedule_offset(schema_id: str, interval: timedelta, sync_time_of_day: time | None) -> int:
@@ -80,21 +88,20 @@ def schedule_offset(schema_id: str, interval: timedelta, sync_time_of_day: time 
         minutes = sync_time_of_day.hour * 60 + sync_time_of_day.minute
     else:
         rng = random.Random(str(schema_id))
-        hours = 0
         jitter_minutes = 0
         if interval <= timedelta(minutes=5):
-            hours, jitter_minutes = _jitter_timedelta(timedelta(minutes=5), rng)
+            jitter_minutes = _jitter_minutes(timedelta(minutes=5), rng)
         elif interval <= timedelta(minutes=30):
-            hours, jitter_minutes = _jitter_timedelta(timedelta(minutes=30), rng)
+            jitter_minutes = _jitter_minutes(timedelta(minutes=30), rng)
         elif interval <= timedelta(hours=1):
-            hours, jitter_minutes = _jitter_timedelta(timedelta(hours=1), rng)
+            jitter_minutes = _jitter_minutes(timedelta(hours=1), rng)
         elif interval <= timedelta(hours=6):
-            hours, jitter_minutes = _jitter_timedelta(timedelta(hours=6), rng)
+            jitter_minutes = _jitter_minutes(timedelta(hours=6), rng)
         elif interval <= timedelta(hours=12):
-            hours, jitter_minutes = _jitter_timedelta(timedelta(hours=12), rng)
+            jitter_minutes = _jitter_minutes(timedelta(hours=12), rng)
         elif interval <= timedelta(days=1):
-            hours, jitter_minutes = _jitter_timedelta(timedelta(days=1), rng)
-        minutes = hours * 60 + jitter_minutes
+            jitter_minutes = _jitter_minutes(timedelta(days=1), rng)
+        minutes = jitter_minutes
     return int((timedelta(minutes=minutes) % interval).total_seconds())
 
 
@@ -132,12 +139,12 @@ def _in_scope_queryset():
     )
 
 
-def fetch_in_scope_schemas() -> list[tuple[str, int, timedelta, time | None]]:
-    """Every schema the scheduler would manage: (schema_id, team_id, interval,
-    sync_time_of_day). Read-only fleet-wide scan; call via the async wrapper."""
+def fetch_in_scope_schemas() -> list[InScopeSchema]:
+    """Every schema the scheduler would manage. Read-only fleet-wide scan; call
+    via the async wrapper."""
     rows = _in_scope_queryset().values_list("id", "team_id", "sync_frequency_interval", "sync_time_of_day")
     return [
-        (str(schema_id), team_id, interval, sync_time)
+        InScopeSchema(schema_id=str(schema_id), team_id=team_id, interval=interval, sync_time_of_day=sync_time)
         for schema_id, team_id, interval, sync_time in rows.iterator(chunk_size=1000)
     ]
 

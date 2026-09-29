@@ -175,7 +175,7 @@ class TestScopePredicate:
         source = _create_source(team, **source_overrides)
         schema = _create_schema(team, source, **schema_overrides)
 
-        in_scope_ids = {row[0] for row in fetch_in_scope_schemas()}
+        in_scope_ids = {row.schema_id for row in fetch_in_scope_schemas()}
         assert (str(schema.id) in in_scope_ids) == expected_in_scope
 
 
