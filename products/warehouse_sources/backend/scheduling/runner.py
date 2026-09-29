@@ -231,12 +231,12 @@ class ShadowScheduler:
         now_epoch = int(time.time())
         rows = await database_sync_to_async_pool(fetch_in_scope_schemas)()
         upserts: list[DueSchedule] = []
-        for row in rows:
+        for schema_row in rows:
             schema_id, team_id, interval, sync_time_of_day = (
-                row.schema_id,
-                row.team_id,
-                row.interval,
-                row.sync_time_of_day,
+                schema_row.schema_id,
+                schema_row.team_id,
+                schema_row.interval,
+                schema_row.sync_time_of_day,
             )
             interval_seconds = int(interval.total_seconds())
             if interval_seconds <= 0:
