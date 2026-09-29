@@ -137,6 +137,7 @@ pub enum FlagError {
 pub(crate) const CODE_FLAG_DATA_PARSING: &str = "flag_data_parsing_error";
 pub(crate) const CODE_PERSON_NOT_FOUND: &str = "person_not_found";
 
+const TIMEOUT_CLIENT: &str = "client_timeout";
 const TIMEOUT_PERSONS_DB_DEADLINE: &str = "persons_db_deadline";
 
 impl FlagError {
@@ -199,6 +200,10 @@ impl FlagError {
             code: CODE_PERSON_NOT_FOUND,
             cause: anyhow::anyhow!("Person not found"),
         }
+    }
+
+    pub fn client_timeout() -> Self {
+        FlagError::TimeoutError(Some(TIMEOUT_CLIENT.to_string()))
     }
 
     pub fn persons_db_deadline() -> Self {
@@ -650,9 +655,7 @@ impl From<CustomRedisError> for FlagError {
 impl From<CustomDatabaseError> for FlagError {
     fn from(e: CustomDatabaseError) -> Self {
         match e {
-            CustomDatabaseError::Timeout(_) => {
-                FlagError::TimeoutError(Some("client_timeout".to_string()))
-            }
+            CustomDatabaseError::Timeout(_) => FlagError::client_timeout(),
             CustomDatabaseError::Other(sqlx_error) => {
                 // Check if it's a timeout-related SQL error
                 if is_timeout_error(&sqlx_error) {
