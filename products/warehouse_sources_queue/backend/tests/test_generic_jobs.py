@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -8,6 +8,7 @@ import psycopg
 
 from products.warehouse_sources_queue.backend.core.batch_consumer import BatchConsumerConfig, _group_by_key
 from products.warehouse_sources_queue.backend.core.generic_jobs import JOB_LEASE_TABLE, JOB_TABLE, Job, JobsTable
+from products.warehouse_sources_queue.backend.core.jobs_db import PendingBatch
 from products.warehouse_sources_queue.backend.sdk.jobs import (
     Fail,
     FollowerSpec,
@@ -200,7 +201,7 @@ class TestClaim:
 
         claimed = await _claim(conn)
         assert {job.team_id for job in claimed} == {1, 2}
-        assert len(_group_by_key(claimed)) == 1
+        assert len(_group_by_key(cast("list[PendingBatch]", claimed))) == 1
 
     @pytest.mark.asyncio
     async def test_waiting_retry_respects_backoff(self, conn):
