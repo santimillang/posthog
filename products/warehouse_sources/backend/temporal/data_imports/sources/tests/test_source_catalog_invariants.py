@@ -84,7 +84,6 @@ SOURCES_WITHOUT_AN_ICON_FILE = {
     "Skyvern",
     "Slash",
     "Synthesia",
-    "Telli",
     "TerraApi",
     "TriggerDev",
     "Turso",
