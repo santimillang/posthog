@@ -67,6 +67,9 @@ class DecisionRequest:
     ai_product: str = "ml_inference"
     trace_id: str | None = None
     properties: dict[str, str] | None = None
+    # The gateway records the request state and answers into the internal AI observability project
+    # unless asked not to. Set this when the state carries customer content.
+    privacy_mode: bool = False
 
     def __post_init__(self) -> None:
         if len(self.questions) > MAX_QUESTIONS_PER_REQUEST:
