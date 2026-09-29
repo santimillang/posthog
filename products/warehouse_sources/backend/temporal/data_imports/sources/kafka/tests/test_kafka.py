@@ -23,6 +23,7 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.common.mix
 from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.kafka import KafkaSourceConfig
 from products.warehouse_sources.backend.temporal.data_imports.sources.kafka.kafka import (
     AUTHENTICATION_FAILED_MESSAGE,
+    KAFKA_CLOUD_UNAVAILABLE_MESSAGE,
     MISSING_SASL_CREDENTIALS_MESSAGE,
     UNREACHABLE_MESSAGE,
     KafkaSourceError,
@@ -311,6 +312,16 @@ class TestFetchCluster:
             admin.return_value.list_topics.return_value = metadata
             with pytest.raises(HostNotAllowedError):
                 fetch_cluster(_config(), team_id=1)
+
+    def test_cloud_teams_are_rejected_before_connecting(self) -> None:
+        with (
+            patch(f"{_MODULE}.is_cloud", return_value=True),
+            patch(f"{_MODULE}.is_team_allowlisted_for_internal_hosts", return_value=False),
+            patch(f"{_MODULE}.AdminClient") as admin,
+        ):
+            with pytest.raises(HostNotAllowedError, match=re.escape(KAFKA_CLOUD_UNAVAILABLE_MESSAGE)):
+                fetch_cluster(_config(), team_id=1)
+        admin.assert_not_called()
 
     def test_a_private_bootstrap_host_is_rejected_before_connecting(self) -> None:
         with (

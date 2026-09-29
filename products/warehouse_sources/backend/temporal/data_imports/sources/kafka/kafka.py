@@ -9,12 +9,14 @@ from confluent_kafka import TIMESTAMP_NOT_AVAILABLE, Consumer, KafkaError, Kafka
 from confluent_kafka.admin import AdminClient
 from structlog.types import FilteringBoundLogger
 
+from posthog.cloud_utils import is_cloud
 from posthog.dataclasses import frozen
 
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.cursor import SourceCursorManager
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import (
     DATABASE_HOST_NOT_ALLOWED_ERROR,
     HostNotAllowedError,
+    is_team_allowlisted_for_internal_hosts,
     resolve_safe_host,
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceResponse
@@ -56,6 +58,9 @@ NO_TOPICS_MESSAGE = (
     "and read the topics you want to import."
 )
 TOPIC_NOT_FOUND_MESSAGE = "The Kafka topic for this table no longer exists, or this user can no longer read it."
+KAFKA_CLOUD_UNAVAILABLE_MESSAGE = (
+    "Kafka sources are not available on PostHog Cloud because the Kafka client cannot pin broker DNS addresses."
+)
 
 _SASL_MECHANISMS: dict[str, str] = {
     "sasl_plain": "PLAIN",
@@ -159,6 +164,11 @@ def fetch_cluster(config: KafkaSourceConfig, team_id: int) -> KafkaCluster:
     The bootstrap servers only hand out the cluster's metadata. The client then connects to each
     broker the metadata advertises, so those addresses are checked as well as the configured ones.
     """
+    if is_cloud() and not is_team_allowlisted_for_internal_hosts(team_id):
+        # librdkafka resolves broker names itself and exposes no resolver hook. A separate preflight
+        # lookup would leave a DNS-rebinding gap, so untrusted Cloud teams cannot use this raw socket.
+        raise HostNotAllowedError(KAFKA_CLOUD_UNAVAILABLE_MESSAGE)
+
     _check_hosts(parse_bootstrap_hosts(config.bootstrap_servers), team_id)
 
     errors = _ErrorCollector()
