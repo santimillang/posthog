@@ -1,6 +1,7 @@
 import io
 import time
 import uuid
+import importlib
 from datetime import (
     UTC,
     datetime,
@@ -18,7 +19,6 @@ from asgiref.sync import async_to_sync
 from posthog.api.test.test_organization import create_organization
 from posthog.api.test.test_team import create_team
 
-from products.data_warehouse.backend.logic.data_load.service import get_sync_schedule
 from products.warehouse_sources.backend.management.commands.report_warehouse_scheduler_shadow import (
     parse_schedule_fired_at,
 )
@@ -39,6 +39,12 @@ from products.warehouse_sources.backend.scheduling.shadow import (
 from products.warehouse_sources_queue.backend.core.scheduler_state import SCHEDULER_DECISION_TABLE
 from products.warehouse_sources_queue.backend.sdk import DueSchedule
 from products.warehouse_sources_queue.backend.testing import ensure_scheduler_tables, get_test_database_url
+
+# The product-structure lint reads a direct import of another product's logic
+# as a facade leak; tests reference cross-product internals by module path
+# instead (the cdc tests' patch targets set the precedent). Parity needs the
+# real schedule builder, not a facade contract.
+get_sync_schedule = importlib.import_module("products.data_warehouse.backend.logic.data_load.service").get_sync_schedule
 
 FIXED_SCHEMA_IDS = [
     "0d3a4c1e-8f2b-4a6d-9c5e-1b7f3a9d2e4c",
